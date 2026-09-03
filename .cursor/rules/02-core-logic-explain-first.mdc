@@ -1,0 +1,27 @@
+---
+description: Explain-first discipline for core systems logic
+globs:
+  - "internal/crawler/**"
+  - "internal/checks/**"
+  - "internal/regression/**"
+alwaysApply: false
+---
+
+These packages are the parts of the project I'm building specifically to
+learn — don't autocomplete them the way you would boilerplate.
+
+Before writing any new function here:
+1. If I haven't already written a function signature or comment describing
+   what it should do, ask me to write one first instead of inventing the
+   interface yourself.
+2. Explain the approach in plain language before generating code — what
+   the algorithm/pattern is and why, not just the code.
+3. If I've already written a draft attempt (even a bad one), review and
+   critique it rather than replacing it wholesale.
+4. Keep edits scoped to one function at a time in these directories. Don't
+   restructure multiple files here in one pass.
+
+Boilerplate exception: struct definitions, error wrapping, and import
+management in these packages don't need the explain-first treatment —
+only new algorithmic/systems logic (crawling strategy, check logic,
+regression comparison logic) does.

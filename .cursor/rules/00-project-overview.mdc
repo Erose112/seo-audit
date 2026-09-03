@@ -1,0 +1,27 @@
+---
+description: seo-audit — project overview and architecture
+alwaysApply: true
+---
+
+`seo-audit` is a Go CLI that crawls a site, runs SEO/technical checks,
+scores it 0-100, and acts as a CI quality gate for a separate Go CI runner
+project. It runs standalone (human use, text output) and inside CI
+(machine use, JSON output + exit codes).
+
+Stack: Go, Cobra (`spf13/cobra`), `golang.org/x/net/html` or GoQuery,
+standard `net/http`, `fatih/color` for terminal output, plain Go `testing`.
+
+Package layout:
+```
+cmd/            — Cobra commands
+internal/crawler/    — HTTP fetch, URL frontier, robots.txt, rate limiting
+internal/parser/     — HTML -> PageData
+internal/checks/     — Check implementations (see Check interface)
+internal/scoring/    — PageData + check results -> 0-100 score
+internal/report/     — Text + JSON report generation
+internal/regression/ — Baseline comparison
+```
+
+Data flows one direction: Crawler -> Parser -> Checks -> Scoring -> Report
+-> Regression. Don't skip layers or let a later stage reach back into an
+earlier one's internals.

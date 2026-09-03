@@ -1,0 +1,36 @@
+---
+description: seo-audit — v1 scope boundaries and stable contracts
+alwaysApply: true
+---
+
+**v1 checks only** (don't add more without being asked): title exists/length,
+meta description exists/length, exactly one H1, image alt-text coverage,
+canonical tag exists, viewport tag exists, duplicate titles across the site,
+broken internal links.
+
+**Explicitly deferred — do not implement unless asked:** full schema.org
+validation, JS-rendered page auditing, sitemap intelligence, redirect-chain
+tracking, orphan-page analysis, duplicate meta-description detection, score
+history/trend dashboard, any LLM-based suggestion layer.
+
+**Check interface — all checks implement this, no exceptions:**
+```go
+type Check interface {
+    ID() string
+    Name() string
+    Run(PageData) CheckResult
+}
+```
+
+**Exit codes are a stable contract with the CI runner — do not change:**
+`0` = passed, `1` = score below `--fail-below` or regression detected,
+`2` = crawl/system error.
+
+**JSON report schema is a stable contract with the CI runner.** If a change
+seems needed, stop and flag it explicitly rather than silently adding/
+renaming/removing fields.
+
+**Baseline storage: file-based, not a database.** The tool reads/writes a
+plain JSON report (`<job-dir>/latest.json`) in a persistent directory
+provided by the CI runner. Do not add SQLite or any other DB dependency to
+this project for baseline storage.

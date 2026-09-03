@@ -1,0 +1,15 @@
+---
+description: Freer generation allowed for CLI wiring and plumbing
+globs:
+  - "cmd/**"
+  - "internal/report/**"
+  - "internal/parser/**"
+  - "testdata/**"
+alwaysApply: false
+---
+
+Low learning-value, high time-cost work — generate directly without an
+explain-first step: Cobra command/flag wiring, JSON/struct marshaling and
+tags, HTML parsing boilerplate (tag extraction via goquery/x/net/html),
+error-handling boilerplate, test fixture HTML files, colored terminal
+output formatting.
