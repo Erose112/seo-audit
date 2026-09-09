@@ -1,0 +1,14 @@
+<!DOCTYPE html>
+<html>
+<head>
+<title>Malformed Page</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="description" content="Tags are left unclosed on purpose to exercise lenient parsing.">
+<link rel="canonical" href="https://example.com/malformed">
+<body>
+<h1>Malformed Heading
+<p>This paragraph is never closed
+<div><span>Nested and unclosed content
+<img src="/img/broken.png" alt="Broken layout">
+<a href="/recovered">Recovered link
+</body>
