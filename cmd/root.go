@@ -13,6 +13,6 @@ var rootCmd = &cobra.Command{
 
 func Execute() {
 	if err := rootCmd.Execute(); err != nil {
-		os.Exit(2)
+		os.Exit(2) // system/CLI error, per exit-code contract
 	}
 }
