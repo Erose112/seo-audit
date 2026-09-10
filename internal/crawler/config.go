@@ -1,6 +1,9 @@
 package crawler
 
-import "time"
+import (
+	"fmt"
+	"time"
+)
 
 // Config holds the crawl-wide settings the fetch layer needs. Stage 6 maps
 // the CLI's config.CrawlConfig onto this; keeping it separate stops the
@@ -18,6 +21,12 @@ type Config struct {
 // RetryConfig controls the per-page retry schedule. The per-attempt timeout
 // escalates (BaseTimeout * TimeoutMultiplier^attempt) because a timeout often
 // means the page needed more time, not that it is dead.
+//
+// Zero values are invalid: context.WithTimeout(parent, 0) expires immediately,
+// so an unset MaxTotalPerPage would make every page fail before the first
+// attempt. Call Validate (via NewFetcher / FetchWithRetry) rather than relying
+// on silent defaults — a misconfigured schedule failing every page is worse
+// than a construction error.
 type RetryConfig struct {
 	MaxRetries        int
 	BaseTimeout       time.Duration
@@ -53,4 +62,33 @@ func DefaultConfig() Config {
 		UserAgent:   DefaultUserAgent,
 		Retry:       DefaultRetryConfig(),
 	}
+}
+
+// Validate reports whether rc is safe to use as a FetchWithRetry schedule.
+// MaxRetries may be 0 (single attempt). BaseBackoff may be 0 (no delay
+// between attempts). Every other field must be strictly positive, and the
+// multiplier must be at least 1 so retries cannot shrink the budget.
+func (rc RetryConfig) Validate() error {
+	if rc.MaxRetries < 0 {
+		return fmt.Errorf("RetryConfig.MaxRetries must be >= 0, got %d", rc.MaxRetries)
+	}
+	if rc.BaseTimeout <= 0 {
+		return fmt.Errorf("RetryConfig.BaseTimeout must be > 0, got %s", rc.BaseTimeout)
+	}
+	if rc.TimeoutMultiplier < 1 {
+		return fmt.Errorf("RetryConfig.TimeoutMultiplier must be >= 1, got %v", rc.TimeoutMultiplier)
+	}
+	if rc.BaseBackoff < 0 {
+		return fmt.Errorf("RetryConfig.BaseBackoff must be >= 0, got %s", rc.BaseBackoff)
+	}
+	if rc.MaxTotalPerPage <= 0 {
+		return fmt.Errorf("RetryConfig.MaxTotalPerPage must be > 0, got %s", rc.MaxTotalPerPage)
+	}
+	if rc.MaxTotalPerPage < rc.BaseTimeout {
+		return fmt.Errorf(
+			"RetryConfig.MaxTotalPerPage (%s) must be >= BaseTimeout (%s)",
+			rc.MaxTotalPerPage, rc.BaseTimeout,
+		)
+	}
+	return nil
 }

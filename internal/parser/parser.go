@@ -25,7 +25,12 @@ type PageData struct {
 }
 
 type Image struct {
-	Src, Alt string
+	Src string
+	// Alt is the attribute value when present. An empty string with HasAlt
+	// true is the decorative-image pattern (alt=""); HasAlt false means the
+	// attribute was omitted entirely — the case ImageAltCheck should flag.
+	Alt    string
+	HasAlt bool
 }
 
 type Link struct {
@@ -64,14 +69,18 @@ func Parse(baseURL string, body []byte) (PageData, error) {
 
 	doc.Find("img").Each(func(_ int, s *goquery.Selection) {
 		src, _ := s.Attr("src")
-		alt, _ := s.Attr("alt")
+		alt, hasAlt := s.Attr("alt")
 		src = strings.TrimSpace(src)
 		// A data: or otherwise unresolvable src still needs alt text, so keep
 		// the raw value rather than dropping the image from the results.
 		if abs, err := resolve(base, src); err == nil {
 			src = abs.String()
 		}
-		data.Images = append(data.Images, Image{Src: src, Alt: strings.TrimSpace(alt)})
+		data.Images = append(data.Images, Image{
+			Src:    src,
+			Alt:    strings.TrimSpace(alt),
+			HasAlt: hasAlt,
+		})
 	})
 
 	doc.Find("a[href]").Each(func(_ int, s *goquery.Selection) {
@@ -149,7 +158,7 @@ func sameHost(a, b *url.URL) bool {
 }
 
 func wordCount(doc *goquery.Document) int {
-	body := doc.Find("body")
+	body := doc.Find("body").Clone()
 	if body.Length() == 0 {
 		return 0
 	}

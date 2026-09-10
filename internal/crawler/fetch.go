@@ -34,8 +34,15 @@ type Fetcher struct {
 	cfg    Config
 }
 
-func NewFetcher(client *http.Client, cfg Config) *Fetcher {
-	return &Fetcher{client: client, cfg: cfg}
+// NewFetcher builds a Fetcher after validating the retry schedule embedded in
+// cfg. Workers / MaxBodySize / UserAgent still fall back to defaults at use
+// time; a zero RetryConfig does not, because context.WithTimeout(parent, 0)
+// would make every page fail before the first attempt.
+func NewFetcher(client *http.Client, cfg Config) (*Fetcher, error) {
+	if err := cfg.Retry.Validate(); err != nil {
+		return nil, err
+	}
+	return &Fetcher{client: client, cfg: cfg}, nil
 }
 
 // IsHTML reports whether a Content-Type is worth handing to the parser. An
@@ -63,6 +70,13 @@ func IsHTML(contentType string) bool {
 // MaxTotalPerPage is a hard stop across the whole schedule rather than the sum
 // of whatever the individual attempts happened to use.
 func (f *Fetcher) FetchWithRetry(parent context.Context, rawURL string, rc RetryConfig) (*PageResponse, error) {
+	// rc is passed per call (tests override it), so re-validate even when
+	// NewFetcher already checked cfg.Retry — a zero MaxTotalPerPage here would
+	// otherwise expire the ceiling context before the first attempt.
+	if err := rc.Validate(); err != nil {
+		return nil, err
+	}
+
 	ctx, cancel := context.WithTimeout(parent, rc.MaxTotalPerPage)
 	defer cancel()
 
@@ -106,6 +120,9 @@ func (f *Fetcher) FetchWithRetry(parent context.Context, rawURL string, rc Retry
 		}
 	}
 
+	if parent.Err() != nil {
+		return nil, deadContextError(parent, ctx)
+	}
 	return nil, fmt.Errorf("all retries exhausted: %w", lastErr)
 }
 

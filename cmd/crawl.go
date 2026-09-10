@@ -24,7 +24,10 @@ var crawlCmd = &cobra.Command{
 			cfg.MaxBodySize = crawlCfg.MaxBodySize
 		}
 
-		fetcher := crawler.NewFetcher(crawler.NewClient(cfg), cfg)
+		fetcher, err := crawler.NewFetcher(crawler.NewClient(cfg), cfg)
+		if err != nil {
+			return err
+		}
 		page, err := fetcher.FetchWithRetry(cmd.Context(), crawlCfg.URL, cfg.Retry)
 		if err != nil {
 			return fmt.Errorf("fetch %s: %w", crawlCfg.URL, err)
@@ -58,11 +61,11 @@ func printPageData(cmd *cobra.Command, page *crawler.PageResponse, data parser.P
 
 	missingAlt := 0
 	for _, img := range data.Images {
-		if img.Alt == "" {
+		if !img.HasAlt {
 			missingAlt++
 		}
 	}
-	fmt.Fprintf(out, "Images:           %d (%d missing alt)\n", len(data.Images), missingAlt)
+	fmt.Fprintf(out, "Images:           %d (%d missing alt attr)\n", len(data.Images), missingAlt)
 
 	internal := 0
 	for _, link := range data.Links {
