@@ -1,21 +1,21 @@
-﻿# SEO Audit CLI ΓÇö Development Plan
+﻿# SEO Audit CLI — Development Plan
 
 ## Project Summary
 
 Build **`seo-audit`**, a Go-based command-line SEO auditing tool that crawls a
-website, evaluates SEO/technical-quality rules, generates a 0ΓÇô100 score, and
+website, evaluates SEO/technical-quality rules, generates a 0–100 score, and
 acts as a **CI quality gate**.
 
 It supports two modes of use:
 
-- **Human use** ΓÇö run an audit locally, get readable terminal output.
-- **Automated use** ΓÇö the CI runner executes it on deploy, parses its JSON
+- **Human use** — run an audit locally, get readable terminal output.
+- **Automated use** — the CI runner executes it on deploy, parses its JSON
   report, compares against a baseline, and fails the build on regression.
 
 The project connects two pieces of engineering work:
 
-> **Go CI runner ΓåÆ executes ΓåÆ Go SEO auditing tool ΓåÆ produces structured
-> result ΓåÆ runner decides whether the build passes.**
+> **Go CI runner → executes → Go SEO auditing tool → produces structured
+> result → runner decides whether the build passes.**
 
 ### Core Tech Stack
 
@@ -23,7 +23,7 @@ The project connects two pieces of engineering work:
 |---|---|
 | Language | Go |
 | CLI framework | Cobra (`spf13/cobra`) |
-| HTML parsing | `golang.org/x/net/html` or GoQuery |
+| HTML parsing | GoQuery |
 | HTTP | Go standard `net/http` |
 | `robots.txt` | Go robots parser library |
 | Rate limiting | Go timer/ticker |
@@ -40,7 +40,7 @@ Keep v1 deliberately narrow: a reliable crawler, a small set of well-chosen
 checks, deterministic scoring, JSON reporting, regression detection, and CI
 integration on one real site. Full schema.org validation, JS-rendered pages,
 sitemap intelligence, redirect-chain tracking, orphan-page detection, and any
-LLM-based suggestion layer are explicitly **out of scope for v1** ΓÇö see
+LLM-based suggestion layer are explicitly **out of scope for v1** — see
 "Deferred / v2" at the end. The goal is a small tool that actually gets
 deployed and used, not a comprehensive one that doesn't.
 
@@ -50,31 +50,31 @@ deployed and used, not a comprehensive one that doesn't.
 
 ```text
 CLI
- Γöé
- Γö£ΓöÇΓöÇ Configuration
- Γöé
- Γö£ΓöÇΓöÇ Crawler
- Γöé    Γö£ΓöÇΓöÇ URL frontier
- Γöé    Γö£ΓöÇΓöÇ robots.txt
- Γöé    Γö£ΓöÇΓöÇ rate limiter
- Γöé    ΓööΓöÇΓöÇ HTTP client
- Γöé
- Γö£ΓöÇΓöÇ Parser
- Γöé    ΓööΓöÇΓöÇ HTML ΓåÆ PageData
- Γöé
- Γö£ΓöÇΓöÇ Checks
- Γöé    Γö£ΓöÇΓöÇ On-page
- Γöé    Γö£ΓöÇΓöÇ Technical
- Γöé    ΓööΓöÇΓöÇ Content
- Γöé
- Γö£ΓöÇΓöÇ Scoring Engine
- Γöé
- Γö£ΓöÇΓöÇ Report Generator
- Γöé    Γö£ΓöÇΓöÇ Text
- Γöé    ΓööΓöÇΓöÇ JSON
- Γöé
- ΓööΓöÇΓöÇ Regression Engine
-      ΓööΓöÇΓöÇ Baseline comparison (file-based)
+ │
+ ├── Configuration
+ │
+ ├── Crawler
+ │    ├── URL frontier
+ │    ├── robots.txt
+ │    ├── rate limiter
+ │    └── HTTP client
+ │
+ ├── Parser
+ │    └── HTML → PageData
+ │
+ ├── Checks
+ │    ├── On-page
+ │    ├── Technical
+ │    └── Content
+ │
+ ├── Scoring Engine
+ │
+ ├── Report Generator
+ │    ├── Text
+ │    └── JSON
+ │
+ └── Regression Engine
+      └── Baseline comparison (file-based)
 ```
 
 ---
@@ -92,7 +92,7 @@ CLI
 - Run non-interactively in CI
 
 **Non-functional**
-- Deterministic scoring (same input ΓåÆ same score, every run)
+- Deterministic scoring (same input → same score, every run)
 - Reasonable crawl speed and memory use
 - Clear error handling for crawl failures
 - Checks implemented as an extensible framework, not hardcoded logic
@@ -105,18 +105,18 @@ Project layout:
 
 ```text
 seo-audit/
-Γö£ΓöÇΓöÇ cmd/
-Γö£ΓöÇΓöÇ internal/
-Γöé   Γö£ΓöÇΓöÇ crawler/
-Γöé   Γö£ΓöÇΓöÇ parser/
-Γöé   Γö£ΓöÇΓöÇ checks/
-Γöé   Γö£ΓöÇΓöÇ scoring/
-Γöé   Γö£ΓöÇΓöÇ report/
-Γöé   ΓööΓöÇΓöÇ regression/
-Γö£ΓöÇΓöÇ testdata/
-Γö£ΓöÇΓöÇ main.go
-Γö£ΓöÇΓöÇ go.mod
-ΓööΓöÇΓöÇ README.md
+├── cmd/
+├── internal/
+│   ├── crawler/
+│   ├── parser/
+│   ├── checks/
+│   ├── scoring/
+│   ├── report/
+│   └── regression/
+├── testdata/
+├── main.go
+├── go.mod
+└── README.md
 ```
 
 Initial commands: `seo-audit crawl`, `seo-audit compare`
@@ -140,7 +140,7 @@ Exit-code contract:
 - **URL normalization**: relative/absolute URLs, fragments, trailing slashes,
   query params, duplicate detection.
 - **Fetch abstraction**: `Fetch(url) -> PageResponse`
-- **HTML ΓåÆ PageData**: title, meta description, headings, images, canonical,
+- **HTML → PageData**: title, meta description, headings, images, canonical,
   viewport, links, word count.
 - **Parser tests**: fixtures for a valid page, missing title, multiple H1s,
   missing alt text, malformed HTML, missing canonical, no viewport.
@@ -160,7 +160,7 @@ type Check interface {
 }
 ```
 
-**v1 checks (~6ΓÇô8 total):**
+**v1 checks (~6–8 total):**
 - Title exists / title length
 - Meta description exists / length
 - Exactly one H1
@@ -184,7 +184,7 @@ deduction: 5
 ## Scoring Engine
 
 ```text
-100 points ΓåÆ deductions ΓåÆ final score
+100 points → deductions → final score
 ```
 
 | Severity | Example deduction |
@@ -197,14 +197,14 @@ Make weighting configurable rather than embedded throughout the codebase.
 Site score = average of page scores (weighting important pages differently is
 a later refinement, not v1).
 
-Tests: perfect score, multiple failures, score clamped to 0ΓÇô100, deterministic
+Tests: perfect score, multiple failures, score clamped to 0–100, deterministic
 output.
 
 ---
 
 ## Crawl Engine
 
-- **Frontier**: BFS queue ΓÇö fetch, parse links, normalize, check visited,
+- **Frontier**: BFS queue — fetch, parse links, normalize, check visited,
   enqueue if new.
 - **Internal-link detection**: only crawl the target domain.
 - **Visited tracking**: prevent duplicate crawling and cycles.
@@ -232,7 +232,7 @@ detection are deferred (see "Deferred / v2").
 
 ## Reporting System
 
-**Stable JSON schema** ΓÇö this matters because the CI runner depends on it, so
+**Stable JSON schema** — this matters because the CI runner depends on it, so
 settle it before building CI integration:
 
 ```json
@@ -251,11 +251,11 @@ settle it before building CI integration:
 
 ```text
 SEO AUDIT
-ΓöüΓöüΓöüΓöüΓöüΓöüΓöüΓöüΓöüΓöüΓöüΓöüΓöüΓöüΓöüΓöüΓöüΓöüΓöüΓöüΓöüΓöüΓöüΓöüΓöüΓöü
-Γ£ô Title length
-Γ£ô Meta description
-Γ£ù Multiple H1 tags
-ΓÜá Missing image alt text
+━━━━━━━━━━━━━━━━━━━━━━━━━━
+✓ Title length
+✓ Meta description
+✗ Multiple H1 tags
+⚠ Missing image alt text
 
 Score: 87/100
 
@@ -278,9 +278,9 @@ seo-audit crawl \
 ```
 
 ```text
-score >= threshold ΓåÆ 0
-score < threshold  ΓåÆ 1
-crawl failure      ΓåÆ 2
+score >= threshold → 0
+score < threshold  → 1
+crawl failure      → 2
 ```
 
 ---
@@ -296,7 +296,7 @@ This is what turns the tool from an SEO checker into an SEO regression gate.
 - **Check-level comparison**: detect specific checks flipping from PASS to
   FAIL, not just an overall score drop.
 - **New vs. existing failures**: distinguish a pre-existing problem from a
-  regression introduced by this change ΓÇö this distinction is what makes the
+  regression introduced by this change — this distinction is what makes the
   gate useful in CI instead of just noisy.
 
 Example output:
@@ -304,11 +304,11 @@ Example output:
 SEO REGRESSION DETECTED
 
 Score:
-91 ΓåÆ 84 (-7)
+91 → 84 (-7)
 
 New failures:
-Γ£ù /about ΓÇö missing canonical
-Γ£ù /programs ΓÇö duplicate title
+✗ /about — missing canonical
+✗ /programs — duplicate title
 
 Build failed.
 ```
@@ -323,7 +323,7 @@ Don't extend the CI runner's SQLite schema for this in v1. Instead:
 2. `seo-audit` reads `<job-dir>/latest.json` as the baseline at the start of
    a run (if it exists), and overwrites it with the current report at the
    end.
-3. No database schema changes, no coupling between the two projects ΓÇö the
+3. No database schema changes, no coupling between the two projects — the
    SEO tool doesn't need to know anything about the runner's internals.
 
 **Deferred to v2 (optional):** a generic `job_artifacts` table in the
@@ -350,11 +350,11 @@ seo-audit:
 - **Binary distribution**: ship a versioned release binary the runner can
   fetch, rather than building Go from source on every run.
 - **stdout/stderr**: streamed through the runner's existing log pipeline.
-- **Exit code mapping**: 0 ΓåÆ success, 1 ΓåÆ failed quality gate, 2 ΓåÆ
+- **Exit code mapping**: 0 → success, 1 → failed quality gate, 2 →
   infrastructure/tool failure.
 - **Report persistence**: written to the per-job directory described above.
 - **Dashboard integration**: surface score, previous score, delta, and
-  failing checks ΓÇö not just a pass/fail marker.
+  failing checks — not just a pass/fail marker.
 
 ---
 
@@ -362,10 +362,10 @@ seo-audit:
 
 - Run against QRET and Degree Planner; review crawl coverage, false
   positives, robots behavior, scoring sanity.
-- Basic performance check: pages/second, memory use, crawl time ΓÇö enough to
+- Basic performance check: pages/second, memory use, crawl time — enough to
   confirm it won't time out or blow up memory on a real site.
 - Failure testing: intentionally introduce a broken link, missing title,
-  duplicate title, missing canonical, bad H1 structure ΓÇö confirm the CI gate
+  duplicate title, missing canonical, bad H1 structure — confirm the CI gate
   catches each one.
 - Set up a nightly scheduled run (independent of deploys) to catch
   regressions from CMS/content changes, not just code changes.
@@ -393,52 +393,52 @@ No LLM/AI-suggestion layer is planned for this project.
 ## Final Architecture
 
 ```text
-                    ΓöîΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÉ
-                    Γöé   Cobra CLI  Γöé
-                    ΓööΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓö¼ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÿ
-                           Γöé
-                    ΓöîΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓû╝ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÉ
-                    Γöé   Crawler    Γöé
-                    Γöé HTTP         Γöé
-                    Γöé robots.txt   Γöé
-                    Γöé rate limit   Γöé
-                    Γöé frontier     Γöé
-                    ΓööΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓö¼ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÿ
-                           Γöé
-                    ΓöîΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓû╝ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÉ
-                    Γöé    Parser    Γöé
-                    Γöé    HTML      Γöé
-                    ΓööΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓö¼ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÿ
-                           Γöé
-                    ΓöîΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓû╝ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÉ
-                    Γöé    Checks    Γöé
-                    Γöé On-page      Γöé
-                    Γöé Technical    Γöé
-                    Γöé Content      Γöé
-                    ΓööΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓö¼ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÿ
-                           Γöé
-                    ΓöîΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓû╝ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÉ
-                    Γöé   Scoring    Γöé
-                    ΓööΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓö¼ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÿ
-                           Γöé
-              ΓöîΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓö┤ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÉ
-              Γöé                         Γöé
-       ΓöîΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓû╝ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÉ          ΓöîΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓû╝ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÉ
-       Γöé Text Report Γöé          Γöé JSON Report Γöé
-       ΓööΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÿ          ΓööΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓö¼ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÿ
-                                       Γöé
-                               ΓöîΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓû╝ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÉ
-                               Γöé   Regression   Γöé
-                               Γöé    Engine      Γöé
-                               Γöé (file-based    Γöé
-                               Γöé  baseline)     Γöé
-                               ΓööΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓö¼ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÿ
-                                       Γöé
-                               ΓöîΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓû╝ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÉ
-                               Γöé   Go CI Runner Γöé
-                               ΓööΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓö¼ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÿ
-                                       Γöé
-                            ΓöîΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓû╝ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÉ
-                            Γöé Build Pass / Failed Γöé
-                            ΓööΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÿ
+                    ┌──────────────┐
+                    │   Cobra CLI  │
+                    └──────┬───────┘
+                           │
+                    ┌──────▼───────┐
+                    │   Crawler    │
+                    │ HTTP         │
+                    │ robots.txt   │
+                    │ rate limit   │
+                    │ frontier     │
+                    └──────┬───────┘
+                           │
+                    ┌──────▼───────┐
+                    │    Parser    │
+                    │    HTML      │
+                    └──────┬───────┘
+                           │
+                    ┌──────▼───────┐
+                    │    Checks    │
+                    │ On-page      │
+                    │ Technical    │
+                    │ Content      │
+                    └──────┬───────┘
+                           │
+                    ┌──────▼───────┐
+                    │   Scoring    │
+                    └──────┬───────┘
+                           │
+              ┌────────────┴────────────┐
+              │                         │
+       ┌──────▼──────┐          ┌──────▼──────┐
+       │ Text Report │          │ JSON Report │
+       └─────────────┘          └──────┬──────┘
+                                       │
+                               ┌───────▼────────┐
+                               │   Regression   │
+                               │    Engine      │
+                               │ (file-based    │
+                               │  baseline)     │
+                               └───────┬────────┘
+                                       │
+                               ┌───────▼────────┐
+                               │   Go CI Runner │
+                               └───────┬────────┘
+                                       │
+                            ┌──────────▼──────────┐
+                            │ Build Pass / Failed │
+                            └─────────────────────┘
 ```
