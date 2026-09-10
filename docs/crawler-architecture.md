@@ -1,0 +1,815 @@
+# SEO Audit CLI — Crawler / HTTP / Timeout / Context Architecture
+
+**Scope:** This document covers the design of the crawling subsystem only —  
+HTTP client construction, timeout strategy, context/cancellation hierarchy,  
+retry behavior, worker concurrency, and the boundary between page-level and  
+systemic failures. It assumes the surrounding CLI, checks engine, scoring,  
+and reporting layers described in the main development plan.
+
+---
+
+
+
+## 1. Design Goals
+
+- Single target host, user-supplied URL, multi-page BFS crawl.
+- Must behave predictably as a **CI quality gate**: hangs, partial failures,
+and ambiguous states are worse than clean failures.
+- Must not overload the target site (it's the user's own site, but often on
+modest hosting).
+- Failures must be classified correctly so the exit-code contract
+(`0` = pass, `1` = gate failed, `2` = crawl/system error) stays meaningful.
+- Deterministic, bounded resource use: a single bad page or unreachable host
+must not stall or crash the whole audit.
+
+---
+
+
+
+## 2. Context Hierarchy
+
+A single root context governs the entire crawl; every page fetch derives a
+child context from it. This is the backbone the rest of the system hangs off.
+
+```go
+func NewCrawlContext(maxDuration time.Duration) (context.Context, context.CancelFunc) {
+    ctx, cancel := context.WithTimeout(context.Background(), maxDuration)
+    // SIGTERM matters as much as SIGINT here: GitHub Actions job cancellation,
+    // Kubernetes pod termination, and `docker stop` all send SIGTERM, not
+    // Ctrl+C. Without it, CI-initiated cancellation bypasses this cancellation
+    // path entirely and falls back to the OS's default SIGTERM handling —
+    // meaning none of the exit-code contract in §7/§8 gets honored for the
+    // single most likely real-world cancellation source for this tool.
+    ctx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
+    return ctx, func() { stop(); cancel() }
+}
+```
+
+**Decision: add** `--max-duration` **as a first-class CLI flag** (default e.g.
+`5m`), used as the root context deadline.
+
+*Rationale:* The existing flags (`--max-pages`, `--max-depth`, `--delay`)
+bound pages, not wall-clock time. Without a time budget, a large or
+misbehaving site has no natural ceiling, which is unacceptable for a CI gate
+that other builds are waiting on.
+
+### Two independent cancellation paths
+
+
+| Trigger                                                                             | Effect                                                                                                     |
+| ----------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------- |
+| Root deadline (`--max-duration`) elapses, or Ctrl+C/SIGTERM (incl. CI cancellation) | Cancels **every** in-flight fetch simultaneously via context propagation — no manual bookkeeping required. |
+| Per-page context deadline (including retries) elapses                               | Cancels **only that fetch**; the crawl loop catches it, records it as a page-level error, and continues.   |
+
+
+Every subsystem that can block — the HTTP fetch, the rate limiter's delay,
+and the retry backoff — must select on `ctx.Done()` so that root
+cancellation actually propagates instead of leaving the process to finish
+whatever it was doing.
+
+---
+
+
+
+## 3. HTTP Client / Transport
+
+Built once per crawl and shared across all requests (same host throughout,
+so connection reuse matters).
+
+```go
+var ErrTooManyRedirects = errors.New("stopped after 5 redirects")
+
+func NewClient(cfg Config) *http.Client {
+    transport := &http.Transport{
+        DialContext: (&net.Dialer{
+            Timeout:   5 * time.Second,
+            KeepAlive: 30 * time.Second,
+        }).DialContext,
+        TLSHandshakeTimeout: 5 * time.Second,
+        IdleConnTimeout:     90 * time.Second,
+        MaxIdleConnsPerHost: cfg.Workers,
+        MaxConnsPerHost:     cfg.Workers,
+        // No ResponseHeaderTimeout — see below, same reasoning as Client.Timeout.
+    }
+
+    return &http.Client{
+        Transport: transport,
+        CheckRedirect: func(req *http.Request, via []*http.Request) error {
+            if len(via) >= 5 {
+                return ErrTooManyRedirects // sentinel, not a bare errors.New — needed so
+                                           // classifyFetchError (§6) can route this to a
+                                           // non-retryable kind instead of the generic
+                                           // connection-error bucket
+            }
+            return nil
+        },
+        // No Client.Timeout — per-page context deadlines supersede it.
+    }
+}
+```
+
+
+
+### Decision: transport phase timeouts are fixed and conservative, not user-tunable
+
+
+| Timeout               | Value | Rationale                                                                                                                                                    |
+| --------------------- | ----- | ------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `Dialer.Timeout`      | 5s    | Only paid once or twice per crawl (connections are reused via keep-alive); a dead/unreachable host should fail fast regardless of page-level timeout policy. |
+| `TLSHandshakeTimeout` | 5s    | Same reasoning — a hung handshake indicates a broken TLS endpoint or middlebox, not a slow page.                                                             |
+| `IdleConnTimeout`     | 90s   | Standard keep-alive hygiene; not user-facing.                                                                                                                |
+
+
+`Dialer.Timeout` and `TLSHandshakeTimeout` stay fixed because they're each
+paid at most once per connection (kept alive and reused afterward), so they
+don't interact with the per-attempt escalation in §5 — a hung dial or
+handshake indicates a broken endpoint regardless of which retry attempt
+triggered it.
+
+### Decision: `Client.Timeout` **and** `ResponseHeaderTimeout` are deliberately **not set**
+
+**Revision:** the original design kept `Client.Timeout` unset but left
+`ResponseHeaderTimeout: 15s` on the transport. That's inconsistent —
+`ResponseHeaderTimeout` is a *transport-level, non-per-request* setting, so
+it silently caps every attempt at 15s regardless of the context deadline
+passed in for that attempt. Since §5's retry design deliberately escalates
+the per-attempt timeout on retries (15s → 22.5s → 33.75s) specifically to
+give slow-to-respond CMS sites more room on a second try, a fixed
+`ResponseHeaderTimeout: 15s` would silently defeat that on every retry —
+attempts 2 and 3 would still die waiting on headers at the 15s mark no
+matter what the context deadline said.
+
+Per-page context deadlines are strictly more expressive than either
+knob — they support parent-driven cancellation and per-attempt override —
+so carrying `Client.Timeout` or a fixed `ResponseHeaderTimeout` alongside a
+context deadline is redundant at best (for attempt 1) and silently
+incorrect at worst (for retries). Both are left unset; the context deadline
+passed into each `fetchOnce` call is the sole timeout mechanism for
+dial-to-body-start latency on that attempt.
+
+### Decision: redirect cap of 5 hops
+
+Prevents a misconfigured redirect loop from silently consuming the page's
+timeout budget across many hops before failing.
+
+---
+
+
+
+## 4. Worker Concurrency
+
+
+
+### Decision: `--workers` CLI flag, default 4, hard ceiling 10
+
+```go
+rootCmd.Flags().IntVar(&cfg.Workers, "workers", 4, "concurrent page fetches (max 10)")
+
+func validateWorkers(n int) (int, error) {
+    if n < 1 {
+        return 0, fmt.Errorf("--workers must be at least 1, got %d", n)
+    }
+    if n > 10 {
+        return 0, fmt.Errorf("--workers max is 10 to avoid overloading the target site")
+    }
+    return n, nil
+}
+```
+
+**Revision:** the original silently clamped `n < 1` to `1` while erroring on
+`n > 10` — an asymmetry that's inconsistent with §1's own design goal
+("ambiguous states are worse than clean failures"). A silent clamp on
+invalid input can mask a real problem (e.g. `--workers=0` from a bad
+flag/env substitution in a CI pipeline) behind a run that appears to
+succeed. Both out-of-range directions now error explicitly.
+
+*Rationale:* Exposing concurrency is useful (faster audits on well-resourced
+sites), but this tool hits a single host — unbounded concurrency risks
+turning a legitimate audit into an accidental load test against the user's
+own (possibly modest) hosting. The flag value is the single source of truth
+and is wired directly into `MaxConnsPerHost` / `MaxIdleConnsPerHost` so the
+transport can never silently drift out of sync with the worker pool size.
+
+**Interaction to document for users:** effective request rate is
+approximately `workers / delay`. A user setting `--workers 10 --delay 100ms`
+should understand they're generating roughly 100 req/s against their own
+server.
+
+### Worker pool
+
+```go
+func (c *Crawler) runWorkers(ctx context.Context, jobs <-chan string, results chan<- FetchResult) {
+    var wg sync.WaitGroup
+    for i := 0; i < c.cfg.Workers; i++ {
+        wg.Add(1)
+        go func() {
+            defer wg.Done()
+            for {
+                select {
+                case url, ok := <-jobs:
+                    if !ok {
+                        return
+                    }
+                    if err := c.rateLimiter.Wait(ctx); err != nil {
+                        return // root context cancelled during delay
+                    }
+                    resp, err := c.fetcher.FetchWithRetry(ctx, url, c.cfg.RetryConfig)
+                    select {
+                    case results <- FetchResult{URL: url, Resp: resp, Err: err}:
+                    case <-ctx.Done():
+                        return // don't block forever if the consumer stopped draining on cancellation
+                    }
+                case <-ctx.Done():
+                    return
+                }
+            }
+        }()
+    }
+    wg.Wait()
+    close(results)
+}
+```
+
+**Fix:** the original unconditional `results <- FetchResult{...}` send is a
+deadlock risk. Per §8, on cancellation the crawl is meant to hard-exit
+without emitting a report — which implies the results consumer stops
+draining the channel once cancellation is detected. If that happens while a
+worker is blocked mid-send, that worker never returns, `wg.Wait()` never
+completes, and the "hard exit, no partial report" guarantee — the entire
+reason `--max-duration` and signal handling exist — silently fails to hold.
+Wrapping the send in a `select` against `ctx.Done()` closes this gap the
+same way the rate limiter (§9) and retry backoff (§5) already do.
+
+### Gap: frontier / quiescence coordination is not yet specified
+
+`runWorkers` above only shows the worker pool consuming a fixed `jobs`
+channel. It doesn't show — and the original doc doesn't specify elsewhere —
+the coordinator that (a) reads `results`, (b) parses discovered links out of
+successful fetches, (c) feeds newly-discovered URLs back into `jobs`, and
+(d) decides when `jobs` should be closed. This is a real gap, not a detail:
+new jobs are produced *from* in-flight results, so "the frontier looks
+empty" is not sufficient to close `jobs` — a fetch that's still in flight
+could still discover new URLs. This needs an explicit **quiescence**
+condition: stop only when there is no queued work *and* no in-flight fetch
+that could still enqueue more.
+
+A single-goroutine coordinator (only it touches `seen`/`inFlight` — workers
+only ever talk to it via channels, so no extra locking is needed) is a
+reasonable shape for this:
+
+```go
+func (c *Crawler) coordinate(ctx context.Context, root string, cfg Config) *CrawlResults {
+    jobs := make(chan string, cfg.Workers*2)
+    results := make(chan FetchResult, cfg.Workers*2)
+    go c.runWorkers(ctx, jobs, results)
+
+    seen := map[string]bool{root: true}
+    queued, inFlight := 0, 0
+
+    enqueue := func(url string) bool {
+        if queued+inFlight >= cfg.MaxPages {
+            return false // cap reached — stop discovering new work, let in-flight fetches finish
+        }
+        inFlight++
+        select {
+        case jobs <- url:
+            return true
+        case <-ctx.Done():
+            inFlight--
+            return false
+        }
+    }
+
+    enqueue(root)
+    for inFlight > 0 {
+        select {
+        case res := <-results:
+            inFlight--
+            queued++
+            if res.Err == nil {
+                for _, link := range extractLinks(res.Resp) {
+                    if !seen[link] {
+                        seen[link] = true
+                        enqueue(link)
+                    }
+                }
+            }
+            c.results.Record(res)
+        case <-ctx.Done():
+            close(jobs)
+            return c.results // hard-exit path — §8
+        }
+    }
+    close(jobs)
+    return c.results
+}
+```
+
+This is a sketch to establish the shape, not final code — depth tracking
+(`--max-depth`) and the `enqueue` buffered-channel-send edge case (a single
+result can discover several links at once, each a blocking send) both need
+hardening before implementation. The important architectural point is:
+**once** `--max-pages` **is reached, stop enqueuing new work but let already
+in-flight fetches complete normally** — don't cancel them, since a normal
+completion is a legitimate page-level result, not a systemic failure.
+
+---
+
+
+
+## 5. Retry Strategy
+
+
+
+### Decision: retries are in scope for v1, with escalating per-attempt timeouts
+
+The per-page timeout stays **fixed** (not adaptive per-URL — there's no
+reliable way to know in advance which pages are legitimately slower), but
+each **retry** of the same page gets a longer timeout, since a timeout may
+indicate the page needed more time rather than being genuinely dead.
+
+```go
+type RetryConfig struct {
+    MaxRetries        int           // default 2 (3 attempts total)
+    BaseTimeout       time.Duration // default 15s
+    TimeoutMultiplier float64       // default 1.5  → 15s → 22.5s → 33.75s
+    BaseBackoff       time.Duration // default 1s, exponential
+    MaxTotalPerPage   time.Duration // hard ceiling: 90s (was 60s — see rationale below)
+}
+
+func (f *Fetcher) FetchWithRetry(parent context.Context, url string, rc RetryConfig) (*PageResponse, error) {
+    // Hard per-page ceiling, enforced independently of the escalation
+    // schedule below — this WithTimeout call is what actually makes
+    // MaxTotalPerPage a ceiling rather than just a documented intention.
+    ctx, cancel := context.WithTimeout(parent, rc.MaxTotalPerPage)
+    defer cancel()
+
+    var lastErr error
+    timeout := rc.BaseTimeout
+
+    for attempt := 0; attempt <= rc.MaxRetries; attempt++ {
+        if parent.Err() != nil {
+            return nil, parent.Err() // root context dead — stop immediately, propagate up (systemic)
+        }
+        if ctx.Err() != nil {
+            // per-page ceiling exhausted — a page-level timeout, not systemic;
+            // return now instead of burning remaining attempts on a context
+            // that will fail instantly anyway
+            return nil, fmt.Errorf("per-page ceiling (%s) exceeded after %d attempt(s): %w", rc.MaxTotalPerPage, attempt, lastErr)
+        }
+
+        resp, err := f.fetchOnce(ctx, url, timeout) // ctx, not parent — inherits the ceiling
+        if err == nil {
+            return resp, nil
+        }
+        lastErr = err
+
+        if !isRetryable(err) {
+            return nil, err // fail fast — see classification below
+        }
+
+        if attempt < rc.MaxRetries {
+            backoff := time.Duration(float64(rc.BaseBackoff) * math.Pow(2, float64(attempt)))
+            select {
+            case <-time.After(backoff):
+            case <-ctx.Done(): // fires on root cancellation OR ceiling expiry, whichever is first
+                return nil, ctx.Err()
+            }
+            timeout = time.Duration(float64(timeout) * rc.TimeoutMultiplier)
+        }
+    }
+    return nil, fmt.Errorf("all retries exhausted: %w", lastErr)
+}
+```
+
+Note that classification (§6) already does the right thing with the two
+possible `ctx.Err()` values from the backoff `select`: if the *root*
+context died, `ctx.Err()` is `context.Canceled` → `ErrKindCanceled` →
+systemic propagation; if only the per-page *ceiling* expired, `ctx.Err()`
+is `context.DeadlineExceeded` → `ErrKindTimeout` → an ordinary page-level
+result. No extra branching is needed to distinguish the two cases.
+
+### Decision: hard ceiling raised to ~90s total per page (was 60s)
+
+**Revision:** the original 60s ceiling was inconsistent with its own
+escalation schedule and, worse, was never actually enforced in code —
+`MaxTotalPerPage` was declared on the struct but nothing in `FetchWithRetry`
+referenced it. Fixed both problems together:
+
+- **Enforcement:** `FetchWithRetry` now derives a ceiling-bound child
+context via `context.WithTimeout(parent, rc.MaxTotalPerPage)` and uses it
+for every attempt and for the backoff wait, so the ceiling is a real hard
+stop rather than a struct field nobody reads.
+- **Sizing:** the nominal 3-attempt schedule is `15s + 1s(backoff) + 22.5s + 2s(backoff) + 33.75s ≈ 74.25s`. A 60s ceiling would truncate attempt 3 by
+up to ~42% before enforcement even kicks in, defeating the point of
+computing an escalated timeout for it. 90s gives ~16s of margin above the
+nominal worst case (for scheduling jitter, not a design assumption to
+rely on) while still bounding any single dead page to at most 30% of the
+default 300s (`--max-duration 5m`) budget.
+
+
+
+### Decision: retry loop must itself respect the root context
+
+Both the `parent.Err()` check at the top of each attempt (for immediate
+systemic propagation) and the `select` on `ctx.Done()` during backoff (for
+either root cancellation or ceiling expiry) are required — otherwise root
+cancellation (timeout, Ctrl+C, or SIGTERM) could be delayed by up to a full
+backoff/retry cycle before the worker actually stops.
+
+### Retryability classification
+
+```go
+func isRetryable(err error) bool {
+    var fe *FetchError
+    if !errors.As(err, &fe) {
+        return false
+    }
+    switch fe.Kind {
+    case ErrKindTimeout, ErrKindConnection:
+        return true // transient network issues — worth another attempt
+    case ErrKindCanceled:
+        return false // root context dying — never retry, propagate immediately
+    case ErrKindTLS, ErrKindPermanent:
+        return false // deterministic failures (bad cert, NXDOMAIN, redirect loop) —
+                      // retrying reproduces the identical outcome and just burns
+                      // the page's timeout budget for nothing
+    case ErrKindHTTPStatus:
+        return fe.StatusCode == 429 || fe.StatusCode >= 500
+        // 4xx other than 429 (404, 403, 401, 400) are NOT retryable —
+        // these are legitimate findings, not transient glitches; retrying
+        // them wastes time and cannot change the outcome.
+    }
+    return false
+}
+```
+
+**Revision:** the original switch had no case for `ErrKindTLS` and let it
+fall through to the trailing `return false` — correct by accident, but
+`ErrKindTLS` was never actually *produced* by `classifyFetchError` either
+(see §6), so it was dead code carrying an implicit promise it didn't keep.
+The cases are now explicit, and §6 below is updated so DNS/TLS/redirect
+failures actually get classified into a non-retryable kind instead of
+silently falling into the retryable `ErrKindConnection` bucket.
+
+---
+
+
+
+## 6. Error Classification
+
+A shared error type distinguishes cause, which drives both retry eligibility
+(§5) and the systemic-vs-page-level exit code decision (§7).
+
+```go
+type FetchErrorKind int
+
+const (
+    ErrKindTimeout FetchErrorKind = iota
+    ErrKindConnection
+    ErrKindTLS
+    ErrKindHTTPStatus
+    ErrKindPermanent // deterministic, non-network failure (DNS NXDOMAIN, redirect loop) —
+                      // retrying can't produce a different outcome
+    ErrKindCanceled  // parent/root context died — always systemic
+)
+
+type FetchError struct {
+    Kind       FetchErrorKind
+    StatusCode int
+    Err        error
+}
+
+func classifyFetchError(err error) error {
+    if errors.Is(err, context.Canceled) {
+        return &FetchError{Kind: ErrKindCanceled, Err: err}
+    }
+    if errors.Is(err, context.DeadlineExceeded) {
+        return &FetchError{Kind: ErrKindTimeout, Err: err}
+    }
+    if errors.Is(err, ErrTooManyRedirects) {
+        return &FetchError{Kind: ErrKindPermanent, Err: err} // §3 — same loop every retry
+    }
+
+    var dnsErr *net.DNSError
+    if errors.As(err, &dnsErr) {
+        if dnsErr.IsTimeout {
+            return &FetchError{Kind: ErrKindTimeout, Err: err} // resolver was slow — worth another try
+        }
+        return &FetchError{Kind: ErrKindPermanent, Err: err} // e.g. NXDOMAIN — won't resolve differently
+    }
+
+    var certErr x509.UnknownAuthorityError
+    var certInvalidErr x509.CertificateInvalidError
+    var hostnameErr x509.HostnameError
+    if errors.As(err, &certErr) || errors.As(err, &certInvalidErr) || errors.As(err, &hostnameErr) {
+        return &FetchError{Kind: ErrKindTLS, Err: err} // cert/hostname problems don't self-resolve on retry
+    }
+
+    var netErr net.Error
+    if errors.As(err, &netErr) && netErr.Timeout() {
+        return &FetchError{Kind: ErrKindTimeout, Err: err}
+    }
+    return &FetchError{Kind: ErrKindConnection, Err: err}
+}
+```
+
+**Revision:** the original version only distinguished cancellation, timeout,
+and a catch-all `ErrKindConnection` — meaning DNS `no such host`, TLS
+certificate/hostname failures, and the §3 redirect-loop sentinel all fell
+into the retryable bucket. These are all deterministic: a typo'd domain, an
+expired certificate, and a redirect loop all reproduce identically on
+retry, so retrying them only burns backoff time and per-attempt timeout
+budget for a guaranteed-identical result. This matters most on **Rule 1**
+(§7) — the root-URL-unreachable check — since that's exactly the path where
+a bad hostname is most likely to appear, and it's the check the codebase
+most wants to fail fast rather than spend ~74s retrying a typo.
+
+---
+
+
+
+## 7. Systemic vs. Page-Level Failure Boundary (Exit Code 2)
+
+
+
+### Decision: draw the line at "can we trust the report we're about to produce," not "did anything fail"
+
+```go
+func (c *Crawler) evaluateSystemicFailure(results *CrawlResults) error {
+    // Rule 1: root URL itself unreachable after retries — nothing to audit.
+    if results.RootPageFailed {
+        return fmt.Errorf("root URL unreachable: %w", results.RootError)
+    }
+
+    // Rule 2: robots.txt fetch failure is fail-open, not systemic
+    // (unreachable robots.txt is treated as "no restrictions").
+
+    // Rule 3: failure rate too high to trust the score.
+    if results.PagesCrawled > 0 {
+        total := results.PagesCrawled + results.PagesFailed
+        failRate := float64(results.PagesFailed) / float64(total)
+        if failRate > 0.5 && total >= 5 {
+            return fmt.Errorf(
+                "failure rate %.0f%% suggests the site is unreachable, not audit-worthy",
+                failRate*100,
+            )
+        }
+    }
+
+    return nil // individual page failures are scored as check results (exit 0/1 territory)
+}
+```
+
+**Rules:**
+
+1. **Root URL unreachable after retries → exit 2, always.** This is checked
+  as a special case before entering the general crawl loop — the root page
+   isn't "just another page," it's the precondition for the whole audit.
+2. `robots.txt` **unreachable → not systemic.** Consistent with the original
+  plan's "fail safely if unreachable" — treated as no restrictions found.
+3. **>50% of attempted pages failed, with at least 5 pages attempted → exit
+  2.** A handful of broken links or timeouts is exactly what the tool
+   exists to catch and should be scored normally (exit 0/1). But if roughly
+   half or more of the site is failing, that's evidence the site itself is
+   down, blocking the crawler, or misconfigured — reporting a score in that
+   state would let a real regression hide behind "half the crawl failed
+   anyway." The `≥5` guard avoids false-triggering on small sites where 1
+   failure out of 2 pages looks like 50%.
+4. `ErrKindCanceled` **(root context died) always propagates immediately**
+  out of the worker loop and crawl loop, regardless of how many pages had
+   already succeeded — see §8.
+
+Page-level failure reasons (timeout vs. 404 vs. 5xx, and whether retries
+were attempted) should be logged per page so a human investigating an
+exit-2 CI failure isn't left guessing why.
+
+**Clarification: what counts toward** `PagesFailed`**.** Only pages that were
+actually dispatched to a worker and returned a non-nil error count —
+pages never reached because `--max-pages` or `--max-depth` cut the frontier
+off first are neither crawled nor failed, and must not be added to either
+side of the Rule 3 ratio (they'd dilute or inflate `failRate` for reasons
+unrelated to reachability).
+
+### Revision: check Rule 3 incrementally, not only at the end
+
+As originally written, `evaluateSystemicFailure` only runs once, after the
+crawl loop finishes — so a badly broken site burns through its *entire*
+time and page budget (including up to 90s of retries per failing page,
+post-§5-revision) before the tool reports exit 2. For a CI gate where other
+builds are waiting, that's the one place slow failure is most costly. The
+coordinator (§4) should apply the same `failRate > 0.5 && total >= 5` check
+after each result once `total >= 5`, and stop dispatching new work the
+moment it trips — treating it the same as Rule 1 (fail fast) rather than
+only the same as "check once at the end." The final `evaluateSystemicFailure`
+call stays as a safety net for the case where the threshold is crossed by
+the very last few pages, where an incremental check wouldn't have had a
+chance to fire first.
+
+---
+
+
+
+## 8. Cancellation Behavior (Ctrl+C / Root Deadline)
+
+
+
+### Decision: hard-exit on cancellation, no partial report (for now)
+
+When the root context is cancelled — whether by `--max-duration` elapsing,
+`SIGINT` (Ctrl+C), or `SIGTERM` (CI cancellation, see §2) — the crawl stops
+and the process exits without emitting a JSON report.
+
+**Clarification:** exit code 2 now covers several distinct situations
+(deadline exceeded, SIGINT, SIGTERM, root-URL-unreachable, high failure
+rate). The exit code itself should stay uniform — that's the point of the
+exit-code contract — but stderr should say plainly which of these occurred
+(e.g. `"crawl cancelled: --max-duration (5m) exceeded"` vs. `"crawl cancelled: received SIGTERM"`) so a human or CI log isn't left inferring
+the cause from timing alone.
+
+*Rationale:* A partial report risks being misread by the CI runner as a
+complete regression check, which is worse than a clean, unambiguous failure.
+This keeps the exit-code contract simple: cancellation is treated the same
+as any other systemic failure (exit 2), rather than introducing a third
+report state that the regression engine and dashboard would need to handle
+specially. Revisit if local/interactive use later wants partial output for
+debugging — that would be a separate, explicitly-flagged mode
+(e.g. `--allow-partial-report`), not the default.
+
+```go
+for _, url := range frontier.Next() {
+    resp, err := fetcher.FetchWithRetry(ctx, url, retryConfig)
+    if err != nil {
+        var fe *FetchError
+        if errors.As(err, &fe) && fe.Kind == ErrKindCanceled {
+            return err // propagate — Run() exits 2, no report written
+        }
+        results.RecordPageError(url, err) // page-level — continue crawling
+        continue
+    }
+    results.RecordPage(resp)
+}
+```
+
+---
+
+
+
+## 9. Rate Limiter — Context-Aware by Necessity
+
+
+
+### Decision: rate limiter delay must select on `ctx.Done()`, not use a bare `time.Sleep`
+
+```go
+func (r *RateLimiter) Wait(ctx context.Context) error {
+    select {
+    case <-time.After(r.delay):
+        return nil
+    case <-ctx.Done():
+        return ctx.Err()
+    }
+}
+```
+
+*Rationale:* A bare `time.Sleep(r.delay)` is not interruptible. Without this,
+root cancellation could be delayed by up to one full `--delay` period per
+in-flight worker before the process actually stops — undermining the
+hard-exit behavior decided in §8.
+
+**Naming clarification:** `RateLimiter` here is a fixed per-worker pacing
+delay, not a shared token bucket — there's no state shared across workers.
+The "effective rate ≈ `workers / delay`" figure quoted in §4 is therefore an
+approximation, not a guaranteed ceiling: actual aggregate request rate also
+depends on response latency variance across workers. That's fine for this
+tool's actual goal (avoid being egregious against the user's own modest
+hosting, not hit an exact QPS target), but the docs/flag help text
+shouldn't imply it's a precise cap.
+
+---
+
+
+
+## 10. robots.txt Fetch
+
+Uses the same shared HTTP client, but with its own short, fixed timeout
+(10s) derived from the root context — independent of the per-page retry
+timeout model in §5, since it's fetched once at crawl start and a slow
+`robots.txt` shouldn't consume page-level budget. Per §7 Rule 2, failure to
+fetch it is treated as "no restrictions found," not a systemic error.
+
+**Decision:** `robots.txt`**'s** `Crawl-delay` **directive is parsed for**
+`Disallow`**/**`Allow` **rules but not applied to pacing in v1.** Both it and
+`--delay` serve the same "don't overload the target" goal, but honoring a
+site's `Crawl-delay` automatically could silently make `--delay` a no-op or
+produce a much slower crawl than the user configured, which is a confusing
+interaction for a CI tool where predictable run time matters (§1). Worth
+revisiting as an explicit `--respect-crawl-delay` flag later; out of scope
+for v1.
+
+---
+
+
+
+## 11. Response Body Size Limit
+
+
+
+### Decision: 2 MB cap, configurable via `--max-body-size`
+
+```go
+const cap = cfg.MaxBodySize // default 2 * 1024 * 1024
+
+// Read one byte past the cap: io.LimitReader alone can't distinguish "body
+// was exactly at the cap" from "body was truncated", since both produce
+// exactly cap bytes of output.
+data, err := io.ReadAll(io.LimitReader(resp.Body, cap+1))
+if err != nil {
+    return nil, err
+}
+truncated := int64(len(data)) > cap
+if truncated {
+    data = data[:cap]
+}
+```
+
+*Rationale:* SEO checks only need `<head>` metadata, headings, links, and
+image `alt` attributes — not inline assets. Typical HTML documents run tens
+of KB to a few hundred KB; even heavy CMS output with significant inline
+script/tracking noise generally stays under 1–1.5 MB. 2 MB gives headroom
+above that without meaningfully increasing exposure to a misbehaving or
+oversized response. Exposed as a flag rather than hardcoded, since some
+poorly-optimized CMS output (which may itself be worth flagging) can exceed
+it.
+
+**Note:** Go's `http.Transport` transparently gzip-decodes response bodies
+by default, so this cap applies to *decompressed* size. That's consistent
+with the rationale above (it's decompressed HTML size the "tens of KB to a
+few hundred KB" estimate is really about), but worth stating explicitly —
+it's an easy thing for an implementer to assume is measured against wire
+bytes instead.
+
+**Handling truncation:** if the read hits the cap (the `cap+1`-byte read
+above actually consumed that extra byte), the page is recorded as a
+distinct check finding ("page exceeds size limit") rather than being fed
+truncated/malformed HTML into GoQuery, which risks silent garbage
+extraction and unreliable scoring for that page.
+
+---
+
+
+
+## 12. End-to-End Flow Summary
+
+```
+Crawler.Run(rootCtx, maxDuration, workers)
+  │
+  ├─ fetch root URL (special case: failure here → exit 2 immediately)
+  ├─ fetch + parse robots.txt (10s timeout, fail-open)
+  │
+  └─ spawn N workers (validated ≤ 10, tied to MaxConnsPerHost)
+       └─ per worker, per queued URL:
+            1. rateLimiter.Wait(ctx)              — ctx-aware, exits clean on cancel
+            2. Fetcher.FetchWithRetry(ctx, url):
+                 attempt 1: fetchOnce(ctx, url, 15s)
+                   ├─ success → done
+                   └─ fail → isRetryable?
+                        ├─ no  (404/403/canceled/TLS/permanent) → return immediately
+                        └─ yes → backoff, escalate timeout ×1.5, retry
+                              (max 2 retries, ≤90s total per page, enforced)
+            3. classify result:
+                 ├─ ErrKindCanceled → propagate → Run() exits 2, no report (hard-exit)
+                 ├─ other error     → RecordPageError (page-level, continues crawl)
+                 └─ success         → RecordPage
+  │
+  └─ evaluateSystemicFailure(results)
+       ├─ root page failed          → exit 2
+       ├─ failure rate > 50% (n≥5)  → exit 2
+       └─ otherwise                 → proceed to scoring/report (exit 0 or 1
+                                       decided by --fail-below downstream)
+```
+
+---
+
+
+
+## 13. Decisions Log (Summary Table)
+
+
+| #   | Decision                                   | Value / Approach                                                                                                                                                                                              |
+| --- | ------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 1   | Overall crawl time budget                  | New `--max-duration` flag, default 5m, becomes root context deadline                                                                                                                                          |
+| 2   | Timeout granularity                        | Transport phase timeouts fixed/conservative (dial 5s, TLS 5s); per-page timeout fixed at 15s base but **escalates on retry** (×1.5), capped at **90s** total per page, **enforced via** `context.WithTimeout` |
+| 3   | Retries                                    | Enabled, max 2 retries (3 attempts), exponential backoff, only for timeout/connection/429/5xx errors — **not** DNS-not-found, TLS/cert errors, or redirect loops                                              |
+| 4   | Exit-code-2 boundary                       | Root URL unreachable, or >50% page failure rate with ≥5 pages attempted (checked **incrementally**, not only at crawl end); individual page failures scored normally                                          |
+| 5   | Cancellation behavior                      | Hard-exit, no partial report, on root context cancellation (deadline, Ctrl+C, **or SIGTERM**); cause reported on stderr                                                                                       |
+| 6   | Body size cap                              | 2 MB default, via `--max-body-size` flag; truncation detected via a `cap+1`-byte read, recorded as a check finding, applies post-decompression                                                                |
+| 7   | Worker concurrency                         | `--workers` flag, default 4, hard max 10 (both bounds now error explicitly — no silent clamp), wired directly into `MaxConnsPerHost`                                                                          |
+| —   | `Client.Timeout` / `ResponseHeaderTimeout` | Neither set — per-page context deadlines supersede both entirely (fixing a bug where `ResponseHeaderTimeout: 15s` silently capped every retry attempt)                                                        |
+| —   | Redirects                                  | Capped at 5 hops; loop error is a sentinel (`ErrTooManyRedirects`) classified as non-retryable                                                                                                                |
+| —   | Rate limiter                               | Context-aware (`select` on `ctx.Done()`) per-worker pacing delay, not a shared token bucket — `workers/delay` is an approximate rate, not a hard cap                                                          |
+| —   | robots.txt                                 | Own fixed 10s timeout, fail-open on failure; `Crawl-delay` parsed but not applied to pacing in v1                                                                                                             |
+| —   | Frontier/quiescence coordination           | Single-goroutine coordinator owns `seen`/in-flight state; workers talk to it only via channels; `--max-pages` stops new enqueues but lets in-flight fetches finish                                            |
+| —   | Worker → results channel send              | Guarded with `select` on `ctx.Done()` to avoid a worker blocking forever if the consumer stops draining on cancellation                                                                                       |
+
+
