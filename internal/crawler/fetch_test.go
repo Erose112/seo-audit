@@ -29,7 +29,11 @@ func newTestFetcher(t *testing.T, cfg Config, handler http.HandlerFunc) (*Fetche
 	t.Helper()
 	srv := httptest.NewServer(handler)
 	t.Cleanup(srv.Close)
-	return NewFetcher(NewClient(cfg), cfg), srv
+	f, err := NewFetcher(NewClient(cfg), cfg)
+	if err != nil {
+		t.Fatalf("NewFetcher: %v", err)
+	}
+	return f, srv
 }
 
 func fetchErrorFrom(t *testing.T, err error) *FetchError {
@@ -378,5 +382,33 @@ func TestIsHTML(t *testing.T) {
 				t.Errorf("IsHTML(%q) = %v, want %v", c.contentType, got, c.want)
 			}
 		})
+	}
+}
+
+func TestNewFetcherRejectsZeroRetryConfig(t *testing.T) {
+	cfg := Config{
+		Workers:     1,
+		MaxBodySize: 1024,
+		UserAgent:   "test",
+		// Retry left zero — the failure mode this guard exists to catch.
+	}
+	f, err := NewFetcher(http.DefaultClient, cfg)
+	if f != nil {
+		t.Errorf("NewFetcher: got fetcher %v, want nil", f)
+	}
+	if err == nil || !strings.Contains(err.Error(), "BaseTimeout must be > 0") {
+		t.Fatalf("NewFetcher: want BaseTimeout validation error, got %v", err)
+	}
+}
+
+func TestFetchWithRetryRejectsZeroRetryConfig(t *testing.T) {
+	// NewFetcher gets a valid schedule; the call site still passes a zero rc.
+	f, srv := newTestFetcher(t, DefaultConfig(), func(w http.ResponseWriter, r *http.Request) {
+		t.Fatal("handler must not be reached when RetryConfig is invalid")
+	})
+
+	_, err := f.FetchWithRetry(context.Background(), srv.URL, RetryConfig{})
+	if err == nil || !strings.Contains(err.Error(), "BaseTimeout must be > 0") {
+		t.Fatalf("FetchWithRetry: want BaseTimeout validation error, got %v", err)
 	}
 }

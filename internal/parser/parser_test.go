@@ -24,7 +24,8 @@ func TestParse(t *testing.T) {
 		wantTitle      string
 		wantH1Count    int
 		wantImages     int
-		wantMissingAlt int
+		wantMissingAlt int // alt attribute omitted
+		wantEmptyAlt   int // alt="" present (decorative)
 		wantLinks      int
 		wantInternal   int
 		wantCanonical  string
@@ -73,7 +74,8 @@ func TestParse(t *testing.T) {
 			wantTitle:      "Missing Alt Text",
 			wantH1Count:    1,
 			wantImages:     3,
-			wantMissingAlt: 2,
+			wantMissingAlt: 1, // <img src=...> with no alt attribute
+			wantEmptyAlt:   1, // <img alt=""> decorative pattern
 			wantLinks:      1,
 			wantInternal:   1,
 			wantCanonical:  "https://example.com/missing-alt",
@@ -138,14 +140,19 @@ func TestParse(t *testing.T) {
 				t.Errorf("len(Images) = %d, want %d", len(data.Images), c.wantImages)
 			}
 
-			missingAlt := 0
+			missingAlt, emptyAlt := 0, 0
 			for _, img := range data.Images {
-				if img.Alt == "" {
+				if !img.HasAlt {
 					missingAlt++
+				} else if img.Alt == "" {
+					emptyAlt++
 				}
 			}
 			if missingAlt != c.wantMissingAlt {
-				t.Errorf("images missing alt = %d, want %d", missingAlt, c.wantMissingAlt)
+				t.Errorf("images missing alt attr = %d, want %d", missingAlt, c.wantMissingAlt)
+			}
+			if emptyAlt != c.wantEmptyAlt {
+				t.Errorf("images with empty alt=\"\" = %d, want %d", emptyAlt, c.wantEmptyAlt)
 			}
 
 			if len(data.Links) != c.wantLinks {
@@ -210,6 +217,28 @@ func TestParseResolvesLinksAgainstBase(t *testing.T) {
 	}
 	if data.Images[1].Src != "https://cdn.example.net/two.png" {
 		t.Errorf("Images[1].Src = %q, want the absolute src unchanged", data.Images[1].Src)
+	}
+}
+
+func TestParseDistinguishesMissingAndEmptyAlt(t *testing.T) {
+	data, err := Parse(testBase, loadFixture(t, "missing_alt.html"))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if len(data.Images) != 3 {
+		t.Fatalf("len(Images) = %d, want 3", len(data.Images))
+	}
+
+	described, decorative, missing := data.Images[0], data.Images[1], data.Images[2]
+
+	if !described.HasAlt || described.Alt != "A described image" {
+		t.Errorf("described = %+v, want HasAlt with text", described)
+	}
+	if !decorative.HasAlt || decorative.Alt != "" {
+		t.Errorf("decorative = %+v, want HasAlt with empty Alt (alt=\"\")", decorative)
+	}
+	if missing.HasAlt || missing.Alt != "" {
+		t.Errorf("missing = %+v, want HasAlt false and empty Alt", missing)
 	}
 }
 
