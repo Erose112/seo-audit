@@ -485,12 +485,161 @@ having as a regression guard given the stated requirement).
 
 
 
+---
+
+
+
+## Stage 6 prerequisites — Architecture retrofit (Stages 1–2)
+
+`docs/crawler-architecture.md` is authoritative for crawl HTTP/context/failure
+behavior. Several of its decisions require **changing already-completed Stage 1
+and Stage 2 surfaces** before the Stage 6 frontier loop is written — the same
+class of dependency as extending Stage 1 config for `--weights` earlier. Do
+this retrofit first; then implement Stage 6 against the updated contracts.
+
+**Dependency direction:** architecture doc (§2–§7) → retrofit Stage 1/2 code +
+timeline contracts below → then new Stage 6 work (frontier, robots, sequential
+loop). Where the Stage 6 sketch below still shows older shapes, **this
+addendum wins**.
+
+### 1. Thread `context.Context` into fetch (and robots)
+
+Architecture cancellation (`--max-duration`, SIGTERM, per-page ceiling, retry
+backoff) only works if every blocking HTTP call uses
+`http.NewRequestWithContext`. The original Stage 2 signature
+`Fetch(client, url) PageResponse` cannot honor that.
+
+**Required shape** (already largely landed as `Fetcher.FetchWithRetry`):
+
+```go
+func (f *Fetcher) FetchWithRetry(parent context.Context, rawURL string, rc RetryConfig) (*PageResponse, error)
+```
+
+`FetchRobots` (new in Stage 6) must take context too — architecture §10 gives
+it a short child timeout from the root ctx:
+
+```go
+func FetchRobots(ctx context.Context, client *http.Client, siteURL string) (*RobotsPolicy, error)
+```
+
+Do not introduce a context-free `Fetch` / `FetchRobots` wrapper for the crawl
+path; Stage 6 must call the context-aware APIs directly.
+
+### 2. Extend `CrawlConfig` / flags for architecture fields
+
+Stage 1's original `CrawlConfig` omitted fields the architecture later decided.
+Write them into Stage 1's config **now** (retrofit), not when Stage 6
+discovers it needs them:
+
+```go
+type CrawlConfig struct {
+	URL          string
+	MaxPages     int
+	MaxDepth     int
+	Delay        time.Duration
+	MaxDuration  time.Duration // --max-duration; root context deadline (arch §2)
+	MaxBodySize  int64         // --max-body-size (arch §11); may already be present
+	FailBelow    int
+	Output       string
+	Baseline     string
+	MaxScoreDrop int
+	// Retry schedule maps onto crawler.RetryConfig (arch §5). Prefer embedding
+	// or a nested struct rather than a second parallel config type at the CLI.
+	Retry crawler.RetryConfig
+}
+```
+
+Wire `--max-duration` (default `5m`) and expose retry knobs only if you want
+them user-facing; otherwise keep `Retry` as `crawler.DefaultRetryConfig()`
+filled in at construction with no extra flags. Stage 6's `CrawlOptions` should
+carry `MaxPages` / `MaxDepth` / `Delay` plus whatever the crawl loop needs from
+the above (at minimum the root `context.Context` derived from `MaxDuration`,
+not a second copy of the retry struct if the `Fetcher` already owns it).
+
+### 3. One error taxonomy: `CrawlError` derives from `FetchErrorKind`
+
+Do **not** keep a parallel free-string `Reason` vocabulary
+(`"404"`, `"timeout"`, …). Architecture `FetchErrorKind` is the source of
+truth (and already drives retryability). Stage 6 / Stage 7 must reuse it:
+
+```go
+type CrawlError struct {
+	URL        string
+	Kind       FetchErrorKind // Reason for reports: Kind.String()
+	StatusCode int            // meaningful when Kind == ErrKindHTTPStatus
+	Message    string         // optional detail; parse failures use a sentinel kind or Message-only
+}
+```
+
+When recording a failed fetch: `Kind: fe.Kind`, `StatusCode: fe.StatusCode`.
+Parse / non-HTML failures are not `FetchError`s — use a stable message (e.g.
+`"invalid_html"`) without inventing a second enum. Stage 7 broken-link
+reporting reuses `Kind` / `StatusCode`, not a separate string table.
+
+### 4. `Crawl` return signature, root-URL special case, incremental Rule 3
+
+Architecture §7 / §12 change the **shape** of the crawl loop, not just
+internals. Stage 9 as written only maps score / `--fail-below` → exit 1 and
+generic crawl errors → exit 2; it does not define `evaluateSystemicFailure`.
+That logic belongs in the crawler and must surface as a real error to
+`cmd/crawl.go`.
+
+**Required signature:**
+
+```go
+func Crawl(ctx context.Context, client *http.Client, robots *RobotsPolicy, startURL string, opts CrawlOptions) (CrawlResult, error)
+```
+
+- `(result, nil)` — crawl completed (possibly with page-level errors); caller
+  scores/reports, then applies `--fail-below` / regression (exit 0 or 1).
+- `(result, err)` — systemic stop; caller prints `err` to stderr and exits 2.
+  Partial `result` may exist for logging but **must not** be written as the
+  JSON report (architecture §8).
+
+**Loop obligations (implement in Stage 6, not deferred to Stage 9):**
+
+1. **Root URL special case:** fetch `startURL` before the general BFS loop.
+   Failure → return systemic error immediately (exit 2). Do not treat the root
+   as just `queue[0]` with the same page-level handling as deep links.
+2. **Incremental Rule 3:** after each attempted page, once `total >= 5`, if
+   `failRate > 0.5`, return a distinguishable systemic error (e.g. wrap or
+   sentinel `ErrSystemicFailureRate`) so the site stops burning
+   `--max-duration` / retry budget. Final `evaluateSystemicFailure` at the end
+   remains a safety net.
+3. **`ErrKindCanceled`:** propagate immediately as `err` (hard-exit, no
+   report) — same exit-2 path as root failure / Rule 3.
+
+Stage 9 then only needs: `err != nil` → exit 2; else score/regression gates →
+exit 0/1. It should not re-implement failure-rate math.
+
+### Already landed vs still TODO (repo check)
+
+| Prerequisite | Status (as of this addendum) |
+| --- | --- |
+| Context-aware `FetchWithRetry` + `FetchErrorKind` | Done in `internal/crawler` |
+| `--max-body-size` / `CrawlConfig.MaxBodySize` | Done |
+| `--max-duration` + `NewCrawlContext` | Still TODO (Stage 6 / cmd wiring) |
+| `FetchRobots(ctx, …)` | Still TODO |
+| `CrawlError` ← `FetchErrorKind` | Still TODO (no `Crawl` yet) |
+| `Crawl(ctx, …) (CrawlResult, error)` + root / Rule 3 | Still TODO |
+
+**Also supersedes** the Stage 6 “v1: log and skip, don’t retry” note below:
+retries follow architecture §5 (already implemented on the fetcher).
+
+---
+
+
+
 ## Stage 6 — Crawl Engine (Frontier, robots.txt, Rate Limiting)
 
 **Goal:** The real multi-page crawler: BFS frontier, robots.txt compliance,
 depth/page limits, rate limiting, error classification. This is the
 highest-complexity stage — build it after Stages 2–3 are solid since it
 composes them directly.
+
+**Before coding:** complete the [Stage 6 prerequisites](#stage-6-prerequisites--architecture-retrofit-stages-12)
+addendum. Signatures, config fields, error taxonomy, and systemic-exit shape
+there override the older sketch fragments in this stage.
 
 **Knowledge needed:**
 
@@ -499,15 +648,16 @@ visited set keyed on the Stage 3 normalized URL
 - `robots.txt` parsing — use an existing Go library (e.g.
 `github.com/temoto/robotstxt`) rather than hand-rolling the spec's
 edge cases (wildcard patterns, `Crawl-delay`, multiple user-agent blocks)
-- Concurrency decision for v1: **recommend a single-goroutine sequential
-crawl** gated by `time.Sleep(delay)` between requests — simpler, fully
-deterministic ordering (helps the "deterministic scoring" requirement and
-makes debugging tractable), and crawl speed isn't a stated bottleneck for
-v1. Note in README that a worker-pool version is a natural v2 upgrade if
-crawl time becomes a problem on larger sites.
-- Distinguishing transient vs terminal errors: timeout/connection-refused are
-retryable-in-theory but for v1, log and skip (don't retry — keeps runtime
-bounded and predictable for CI).
+- Concurrency decision for v1: **single-goroutine sequential crawl** with a
+context-aware inter-request delay (see `docs/crawler-architecture.md` §4 /
+§9) — fully deterministic ordering under `--max-pages` (required for the
+baseline/regression gate), simpler to debug, and crawl speed isn't a stated
+bottleneck for v1. No `--workers` flag. A level-synchronous parallel
+fetcher is a natural v2 upgrade if wall-clock time becomes a problem on
+larger sites.
+- Error classification: reuse `FetchErrorKind` from the fetcher (retries per
+architecture §5); do not invent a parallel string taxonomy — see
+prerequisites §3
 
 **Work:**
 
@@ -520,11 +670,12 @@ type RobotsPolicy struct {
 	group *robotstxt.Group
 }
 
-func FetchRobots(client *http.Client, siteURL string) (*RobotsPolicy, error) {
-	// GET /robots.txt; on fetch failure, "fail safely" per spec — for v1,
-	// fail safe = allow all (log a warning), since blocking the whole crawl
-	// because robots.txt is unreachable is worse for a QA tool than the
-	// (documented) risk of crawling a page robots.txt would have disallowed.
+func FetchRobots(ctx context.Context, client *http.Client, siteURL string) (*RobotsPolicy, error) {
+	// GET /robots.txt under a short child of ctx (arch §10, ~10s); on fetch
+	// failure, "fail safely" per spec — for v1, fail safe = allow all (log a
+	// warning), since blocking the whole crawl because robots.txt is
+	// unreachable is worse for a QA tool than the (documented) risk of
+	// crawling a page robots.txt would have disallowed.
 }
 
 func (p *RobotsPolicy) Allowed(path string) bool { ... }
@@ -547,9 +698,12 @@ type CrawledPage struct {
 	FetchTime time.Duration
 }
 
+// CrawlError — see Stage 6 prerequisites §3 (Kind from FetchErrorKind, not a free string).
 type CrawlError struct {
-	URL    string
-	Reason string // "404", "403", "429", "500", "timeout", "connection", "invalid_html"
+	URL        string
+	Kind       FetchErrorKind
+	StatusCode int
+	Message    string
 }
 
 type CrawlOptions struct {
@@ -558,53 +712,16 @@ type CrawlOptions struct {
 	Delay    time.Duration
 }
 
-func Crawl(client *http.Client, robots *RobotsPolicy, startURL string, opts CrawlOptions) CrawlResult {
-	type queueItem struct {
-		url   string
-		depth int
-	}
-	queue := []queueItem{{startURL, 0}}
-	visited := map[string]bool{}
-	result := CrawlResult{}
-
-	for len(queue) > 0 && len(result.Pages) < opts.MaxPages {
-		item := queue[0]
-		queue = queue[1:]
-
-		norm, err := Normalize(item.url)
-		if err != nil || visited[norm] {
-			continue
-		}
-		visited[norm] = true
-
-		if !robots.Allowed(item.url) {
-			continue
-		}
-
-		resp := Fetch(client, item.url)
-		classifyAndMaybeRecord(&result, resp, item.url)
-		if resp.FetchErr != nil || resp.StatusCode >= 400 {
-			continue
-		}
-
-		pd, err := parser.Parse(item.url, resp.Body)
-		if err != nil {
-			result.Errors = append(result.Errors, CrawlError{item.url, "invalid_html"})
-			continue
-		}
-		result.Pages = append(result.Pages, CrawledPage{item.url, item.depth, pd, resp.Duration})
-
-		if item.depth < opts.MaxDepth {
-			for _, link := range pd.Links {
-				if link.Internal {
-					queue = append(queue, queueItem{link.Href, item.depth + 1})
-				}
-			}
-		}
-
-		time.Sleep(opts.Delay)
-	}
-	return result
+// Returns (result, nil) on normal completion; (result, err) on systemic stop
+// (root failure, Rule 3, cancellation). See prerequisites §4.
+func Crawl(ctx context.Context, client *http.Client, robots *RobotsPolicy, startURL string, opts CrawlOptions) (CrawlResult, error) {
+	// 1. Fetch root URL first — failure → return systemic err (exit 2).
+	// 2. Sequential BFS: rateLimiter.Wait(ctx) then FetchWithRetry(ctx, ...).
+	// 3. Record page errors via FetchErrorKind; enqueue internal links.
+	// 4. After each attempt with total >= 5, incremental Rule 3 → systemic err.
+	// 5. ErrKindCanceled → return err immediately (no report).
+	// Full loop sketch deferred to implementation; older queue-only sketch
+	// omitted here so it cannot drift from the prerequisites.
 }
 ```
 
@@ -612,7 +729,9 @@ func Crawl(client *http.Client, robots *RobotsPolicy, startURL string, opts Craw
 a local test server serving a small fixture site (3–4 linked pages, one
 robots.txt-disallowed page, one broken link, one 500) and assert the crawler
 visits exactly the right set, respects `max-pages`/`max-depth`, and
-classifies errors correctly. This is more valuable than mocking `Fetch`
+classifies errors correctly. Also assert: root URL down → error return;
+sustained >50% failures with ≥5 attempts → early systemic error (does not
+exhaust the full page budget). This is more valuable than mocking `Fetch`
 directly because it exercises the real HTTP + robots.txt path together.
 
 **Exit criteria:** crawler test suite passes against the local `httptest`
@@ -745,6 +864,12 @@ produces the formatted terminal report from the project doc's mockup.
 ## Stage 9 — Exit Codes / CI Gate Behavior
 
 **Goal:** Wire the score into process exit codes per the documented contract.
+
+**Note:** Systemic crawl failures (root URL down, incremental Rule 3 failure
+rate, cancellation) are already returned as `error` from `Crawl` — see
+[Stage 6 prerequisites §4](#stage-6-prerequisites--architecture-retrofit-stages-12).
+This stage only maps that error → exit 2; it does not re-implement
+`evaluateSystemicFailure`.
 
 **Knowledge needed:**
 

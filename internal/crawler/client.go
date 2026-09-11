@@ -24,13 +24,6 @@ var ErrTooManyRedirects = errors.New("stopped after 5 redirects")
 // FetchWithRetry. The context deadline passed into each attempt is the only
 // timeout mechanism for request latency.
 func NewClient(cfg Config) *http.Client {
-	workers := cfg.Workers
-	if workers < 1 {
-		// A zero value here is a programming error, not user input; flag-level
-		// validation of --workers lands with the worker pool in Stage 6.
-		workers = DefaultWorkers
-	}
-
 	transport := &http.Transport{
 		DialContext: (&net.Dialer{
 			Timeout:   5 * time.Second,
@@ -40,8 +33,11 @@ func NewClient(cfg Config) *http.Client {
 		// stay fixed and conservative rather than tracking the retry schedule.
 		TLSHandshakeTimeout: 5 * time.Second,
 		IdleConnTimeout:     90 * time.Second,
-		MaxIdleConnsPerHost: workers,
-		MaxConnsPerHost:     workers,
+		// Sequential crawl: one in-flight request. Cap the transport to match
+		// so a later concurrency change can't silently open more connections
+		// than the crawl loop intends.
+		MaxIdleConnsPerHost: 1,
+		MaxConnsPerHost:     1,
 	}
 
 	return &http.Client{

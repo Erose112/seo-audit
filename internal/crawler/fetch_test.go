@@ -387,7 +387,6 @@ func TestIsHTML(t *testing.T) {
 
 func TestNewFetcherRejectsZeroRetryConfig(t *testing.T) {
 	cfg := Config{
-		Workers:     1,
 		MaxBodySize: 1024,
 		UserAgent:   "test",
 		// Retry left zero — the failure mode this guard exists to catch.

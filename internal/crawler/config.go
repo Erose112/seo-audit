@@ -9,9 +9,6 @@ import (
 // the CLI's config.CrawlConfig onto this; keeping it separate stops the
 // internal packages from depending on Cobra flag wiring.
 type Config struct {
-	// Workers is the concurrent-fetch count. It also drives the transport's
-	// per-host connection caps so the pool and the transport can't drift.
-	Workers int
 	// MaxBodySize caps how many bytes of a response body are read.
 	MaxBodySize int64
 	UserAgent   string
@@ -38,7 +35,6 @@ type RetryConfig struct {
 }
 
 const (
-	DefaultWorkers     = 4
 	DefaultMaxBodySize = 2 * 1024 * 1024
 	DefaultUserAgent   = "seo-audit/0.1 (+https://github.com/Erose112/seo-audit)"
 )
@@ -57,7 +53,6 @@ func DefaultRetryConfig() RetryConfig {
 
 func DefaultConfig() Config {
 	return Config{
-		Workers:     DefaultWorkers,
 		MaxBodySize: DefaultMaxBodySize,
 		UserAgent:   DefaultUserAgent,
 		Retry:       DefaultRetryConfig(),

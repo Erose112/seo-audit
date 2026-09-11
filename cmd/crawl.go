@@ -18,7 +18,7 @@ var crawlCmd = &cobra.Command{
 	SilenceUsage: true,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		// Stage 2: single-page fetch and parse. The frontier, robots.txt and
-		// worker pool replace this in Stage 6.
+		// sequential BFS loop replace this in Stage 6.
 		cfg := crawler.DefaultConfig()
 		if crawlCfg.MaxBodySize > 0 {
 			cfg.MaxBodySize = crawlCfg.MaxBodySize

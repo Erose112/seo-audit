@@ -35,9 +35,9 @@ type Fetcher struct {
 }
 
 // NewFetcher builds a Fetcher after validating the retry schedule embedded in
-// cfg. Workers / MaxBodySize / UserAgent still fall back to defaults at use
-// time; a zero RetryConfig does not, because context.WithTimeout(parent, 0)
-// would make every page fail before the first attempt.
+// cfg. MaxBodySize / UserAgent still fall back to defaults at use time; a zero
+// RetryConfig does not, because context.WithTimeout(parent, 0) would make
+// every page fail before the first attempt.
 func NewFetcher(client *http.Client, cfg Config) (*Fetcher, error) {
 	if err := cfg.Retry.Validate(); err != nil {
 		return nil, err

@@ -1,9 +1,9 @@
 # SEO Audit CLI — Crawler / HTTP / Timeout / Context Architecture
 
-**Scope:** This document covers the design of the crawling subsystem only —  
-HTTP client construction, timeout strategy, context/cancellation hierarchy,  
-retry behavior, worker concurrency, and the boundary between page-level and  
-systemic failures. It assumes the surrounding CLI, checks engine, scoring,  
+**Scope:** This document covers the design of the crawling subsystem only —
+HTTP client construction, timeout strategy, context/cancellation hierarchy,
+retry behavior, sequential crawl loop, and the boundary between page-level and
+systemic failures. It assumes the surrounding CLI, checks engine, scoring,
 and reporting layers described in the main development plan.
 
 ---
@@ -21,6 +21,10 @@ modest hosting).
 (`0` = pass, `1` = gate failed, `2` = crawl/system error) stays meaningful.
 - Deterministic, bounded resource use: a single bad page or unreachable host
 must not stall or crash the whole audit.
+- Deterministic page selection under `--max-pages`: for an unchanged site,
+two consecutive runs must audit the same URL subset. The crawl order is a
+pure function of link order within fetched pages — not of network latency.
+This is required for the CI regression/baseline gate to be trustworthy.
 
 ---
 
@@ -58,8 +62,8 @@ that other builds are waiting on.
 
 | Trigger                                                                             | Effect                                                                                                     |
 | ----------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------- |
-| Root deadline (`--max-duration`) elapses, or Ctrl+C/SIGTERM (incl. CI cancellation) | Cancels **every** in-flight fetch simultaneously via context propagation — no manual bookkeeping required. |
-| Per-page context deadline (including retries) elapses                               | Cancels **only that fetch**; the crawl loop catches it, records it as a page-level error, and continues.   |
+| Root deadline (`--max-duration`) elapses, or Ctrl+C/SIGTERM (incl. CI cancellation) | Cancels the in-flight fetch (at most one under sequential crawl) via context propagation — no manual bookkeeping required. |
+| Per-page context deadline (including retries) elapses                               | Cancels **only that fetch**; the crawl loop catches it, records it as a page-level error, and continues.                   |
 
 
 Every subsystem that can block — the HTTP fetch, the rate limiter's delay,
@@ -87,8 +91,11 @@ func NewClient(cfg Config) *http.Client {
         }).DialContext,
         TLSHandshakeTimeout: 5 * time.Second,
         IdleConnTimeout:     90 * time.Second,
-        MaxIdleConnsPerHost: cfg.Workers,
-        MaxConnsPerHost:     cfg.Workers,
+        // Sequential crawl: one in-flight request at a time. Cap the transport
+        // to match so a future concurrency change can't silently open more
+        // connections than the crawl loop intends.
+        MaxIdleConnsPerHost: 1,
+        MaxConnsPerHost:     1,
         // No ResponseHeaderTimeout — see below, same reasoning as Client.Timeout.
     }
 
@@ -156,162 +163,100 @@ timeout budget across many hops before failing.
 
 
 
-## 4. Worker Concurrency
+## 4. Crawl Loop Concurrency
 
 
 
-### Decision: `--workers` CLI flag, default 4, hard ceiling 10
+### Decision: single-goroutine sequential crawl for v1 — no `--workers` flag
 
-```go
-rootCmd.Flags().IntVar(&cfg.Workers, "workers", 4, "concurrent page fetches (max 10)")
-
-func validateWorkers(n int) (int, error) {
-    if n < 1 {
-        return 0, fmt.Errorf("--workers must be at least 1, got %d", n)
-    }
-    if n > 10 {
-        return 0, fmt.Errorf("--workers max is 10 to avoid overloading the target site")
-    }
-    return n, nil
-}
-```
-
-**Revision:** the original silently clamped `n < 1` to `1` while erroring on
-`n > 10` — an asymmetry that's inconsistent with §1's own design goal
-("ambiguous states are worse than clean failures"). A silent clamp on
-invalid input can mask a real problem (e.g. `--workers=0` from a bad
-flag/env substitution in a CI pipeline) behind a run that appears to
-succeed. Both out-of-range directions now error explicitly.
-
-*Rationale:* Exposing concurrency is useful (faster audits on well-resourced
-sites), but this tool hits a single host — unbounded concurrency risks
-turning a legitimate audit into an accidental load test against the user's
-own (possibly modest) hosting. The flag value is the single source of truth
-and is wired directly into `MaxConnsPerHost` / `MaxIdleConnsPerHost` so the
-transport can never silently drift out of sync with the worker pool size.
-
-**Interaction to document for users:** effective request rate is
-approximately `workers / delay`. A user setting `--workers 10 --delay 100ms`
-should understand they're generating roughly 100 req/s against their own
-server.
-
-### Worker pool
+v1 fetches one page at a time from a BFS frontier. There is no worker pool
+and no `--workers` CLI flag. Pacing is a context-aware delay between
+requests (§9); transport connection caps are fixed at 1 to match (§3).
 
 ```go
-func (c *Crawler) runWorkers(ctx context.Context, jobs <-chan string, results chan<- FetchResult) {
-    var wg sync.WaitGroup
-    for i := 0; i < c.cfg.Workers; i++ {
-        wg.Add(1)
-        go func() {
-            defer wg.Done()
-            for {
-                select {
-                case url, ok := <-jobs:
-                    if !ok {
-                        return
-                    }
-                    if err := c.rateLimiter.Wait(ctx); err != nil {
-                        return // root context cancelled during delay
-                    }
-                    resp, err := c.fetcher.FetchWithRetry(ctx, url, c.cfg.RetryConfig)
-                    select {
-                    case results <- FetchResult{URL: url, Resp: resp, Err: err}:
-                    case <-ctx.Done():
-                        return // don't block forever if the consumer stopped draining on cancellation
-                    }
-                case <-ctx.Done():
-                    return
-                }
-            }
-        }()
+func (c *Crawler) crawl(ctx context.Context, root string, opts CrawlOptions) (*CrawlResults, error) {
+    type queueItem struct {
+        url   string
+        depth int
     }
-    wg.Wait()
-    close(results)
-}
-```
-
-**Fix:** the original unconditional `results <- FetchResult{...}` send is a
-deadlock risk. Per §8, on cancellation the crawl is meant to hard-exit
-without emitting a report — which implies the results consumer stops
-draining the channel once cancellation is detected. If that happens while a
-worker is blocked mid-send, that worker never returns, `wg.Wait()` never
-completes, and the "hard exit, no partial report" guarantee — the entire
-reason `--max-duration` and signal handling exist — silently fails to hold.
-Wrapping the send in a `select` against `ctx.Done()` closes this gap the
-same way the rate limiter (§9) and retry backoff (§5) already do.
-
-### Gap: frontier / quiescence coordination is not yet specified
-
-`runWorkers` above only shows the worker pool consuming a fixed `jobs`
-channel. It doesn't show — and the original doc doesn't specify elsewhere —
-the coordinator that (a) reads `results`, (b) parses discovered links out of
-successful fetches, (c) feeds newly-discovered URLs back into `jobs`, and
-(d) decides when `jobs` should be closed. This is a real gap, not a detail:
-new jobs are produced *from* in-flight results, so "the frontier looks
-empty" is not sufficient to close `jobs` — a fetch that's still in flight
-could still discover new URLs. This needs an explicit **quiescence**
-condition: stop only when there is no queued work *and* no in-flight fetch
-that could still enqueue more.
-
-A single-goroutine coordinator (only it touches `seen`/`inFlight` — workers
-only ever talk to it via channels, so no extra locking is needed) is a
-reasonable shape for this:
-
-```go
-func (c *Crawler) coordinate(ctx context.Context, root string, cfg Config) *CrawlResults {
-    jobs := make(chan string, cfg.Workers*2)
-    results := make(chan FetchResult, cfg.Workers*2)
-    go c.runWorkers(ctx, jobs, results)
-
+    queue := []queueItem{{root, 0}}
     seen := map[string]bool{root: true}
-    queued, inFlight := 0, 0
 
-    enqueue := func(url string) bool {
-        if queued+inFlight >= cfg.MaxPages {
-            return false // cap reached — stop discovering new work, let in-flight fetches finish
+    for len(queue) > 0 && c.results.PageCount() < opts.MaxPages {
+        if err := ctx.Err(); err != nil {
+            return nil, err // hard-exit path — §8
         }
-        inFlight++
-        select {
-        case jobs <- url:
-            return true
-        case <-ctx.Done():
-            inFlight--
-            return false
-        }
-    }
 
-    enqueue(root)
-    for inFlight > 0 {
-        select {
-        case res := <-results:
-            inFlight--
-            queued++
-            if res.Err == nil {
-                for _, link := range extractLinks(res.Resp) {
-                    if !seen[link] {
-                        seen[link] = true
-                        enqueue(link)
-                    }
-                }
+        item := queue[0]
+        queue = queue[1:]
+
+        if err := c.rateLimiter.Wait(ctx); err != nil {
+            return nil, err // root cancelled during delay
+        }
+
+        resp, err := c.fetcher.FetchWithRetry(ctx, item.url, c.cfg.Retry)
+        if err != nil {
+            var fe *FetchError
+            if errors.As(err, &fe) && fe.Kind == ErrKindCanceled {
+                return nil, err // propagate — Run() exits 2, no report
             }
-            c.results.Record(res)
-        case <-ctx.Done():
-            close(jobs)
-            return c.results // hard-exit path — §8
+            c.results.RecordPageError(item.url, err)
+            continue
+        }
+        c.results.RecordPage(resp)
+
+        if item.depth >= opts.MaxDepth {
+            continue
+        }
+        for _, link := range extractInternalLinks(resp) {
+            if seen[link] {
+                continue
+            }
+            seen[link] = true
+            queue = append(queue, queueItem{link, item.depth + 1})
         }
     }
-    close(jobs)
-    return c.results
+    return c.results, nil
 }
 ```
 
-This is a sketch to establish the shape, not final code — depth tracking
-(`--max-depth`) and the `enqueue` buffered-channel-send edge case (a single
-result can discover several links at once, each a blocking send) both need
-hardening before implementation. The important architectural point is:
-**once** `--max-pages` **is reached, stop enqueuing new work but let already
-in-flight fetches complete normally** — don't cancel them, since a normal
-completion is a legitimate page-level result, not a systemic failure.
+This is a sketch of the Stage 6 shape (aligns with `development-timeline.md`),
+not final code — robots.txt gating, URL normalization before `seen`, and
+systemic-failure checks (§7) still need wiring. The important architectural
+points:
+
+- **Deterministic truncation under `--max-pages`:** queue order depends only
+  on link discovery order within each page. With one fetch at a time, which
+  pages land under the cap is a pure function of site content + flags —
+  required for baseline/regression comparison (§1).
+- **No quiescence/coordinator machinery:** sequential crawl has at most one
+  in-flight fetch, so "frontier empty or cap reached" is sufficient to stop.
+  There is no race between workers finishing and the cap tripping.
+- **Request rate ≈ `1 / delay`:** document that for users; there is no
+  `workers / delay` aggregate.
+
+*Rationale:* Concurrent workers racing a shared `--max-pages` cap make the
+audited URL set depend on response-latency jitter. Two runs against an
+unchanged site can select different subsets and produce false regressions.
+The sites large enough to want parallelism are exactly the sites that hit
+the cap — concurrency helps most where truncation noise hurts most. Crawl
+speed is not a stated v1 bottleneck; trustworthy CI gating is.
+
+**Supersedes:** the earlier draft of this section (`--workers` default 4,
+hard max 10, worker pool + channel coordinator, "stop enqueuing but let
+in-flight finish"). That design is incompatible with deterministic
+page-set selection under a hard page cap.
+
+### Deferred: parallel fetches (v2+)
+
+If crawl wall-clock becomes a real problem on large sites, revisit
+concurrency only with a scheduler that preserves determinism — e.g.
+**level-synchronous BFS** (fetch an entire depth level, possibly in
+parallel; merge and stably order discoveries; then admit the next level /
+apply `--max-pages` to that ordered frontier). A free-racing worker pool
+against a shared cap must not return. Until then, do not expose a
+`--workers` flag; shipping it invites the nondeterministic mode CI should
+not use.
 
 ---
 
@@ -415,7 +360,7 @@ Both the `parent.Err()` check at the top of each attempt (for immediate
 systemic propagation) and the `select` on `ctx.Done()` during backoff (for
 either root cancellation or ceiling expiry) are required — otherwise root
 cancellation (timeout, Ctrl+C, or SIGTERM) could be delayed by up to a full
-backoff/retry cycle before the worker actually stops.
+backoff/retry cycle before the crawl actually stops.
 
 ### Retryability classification
 
@@ -577,7 +522,7 @@ func (c *Crawler) evaluateSystemicFailure(results *CrawlResults) error {
    anyway." The `≥5` guard avoids false-triggering on small sites where 1
    failure out of 2 pages looks like 50%.
 4. `ErrKindCanceled` **(root context died) always propagates immediately**
-  out of the worker loop and crawl loop, regardless of how many pages had
+  out of the crawl loop, regardless of how many pages had
    already succeeded — see §8.
 
 Page-level failure reasons (timeout vs. 404 vs. 5xx, and whether retries
@@ -585,7 +530,7 @@ were attempted) should be logged per page so a human investigating an
 exit-2 CI failure isn't left guessing why.
 
 **Clarification: what counts toward** `PagesFailed`**.** Only pages that were
-actually dispatched to a worker and returned a non-nil error count —
+actually fetched and returned a non-nil error count —
 pages never reached because `--max-pages` or `--max-depth` cut the frontier
 off first are neither crawled nor failed, and must not be added to either
 side of the Rule 3 ratio (they'd dilute or inflate `failRate` for reasons
@@ -598,8 +543,8 @@ crawl loop finishes — so a badly broken site burns through its *entire*
 time and page budget (including up to 90s of retries per failing page,
 post-§5-revision) before the tool reports exit 2. For a CI gate where other
 builds are waiting, that's the one place slow failure is most costly. The
-coordinator (§4) should apply the same `failRate > 0.5 && total >= 5` check
-after each result once `total >= 5`, and stop dispatching new work the
+sequential crawl loop (§4) should apply the same `failRate > 0.5 && total >= 5`
+check after each page once `total >= 5`, and stop dequeuing new work the
 moment it trips — treating it the same as Rule 1 (fail fast) rather than
 only the same as "check once at the end." The final `evaluateSystemicFailure`
 call stays as a safety net for the case where the threshold is crossed by
@@ -673,15 +618,13 @@ func (r *RateLimiter) Wait(ctx context.Context) error {
 ```
 
 *Rationale:* A bare `time.Sleep(r.delay)` is not interruptible. Without this,
-root cancellation could be delayed by up to one full `--delay` period per
-in-flight worker before the process actually stops — undermining the
-hard-exit behavior decided in §8.
+root cancellation could be delayed by up to one full `--delay` period
+before the process actually stops — undermining the hard-exit behavior
+decided in §8.
 
-**Naming clarification:** `RateLimiter` here is a fixed per-worker pacing
-delay, not a shared token bucket — there's no state shared across workers.
-The "effective rate ≈ `workers / delay`" figure quoted in §4 is therefore an
-approximation, not a guaranteed ceiling: actual aggregate request rate also
-depends on response latency variance across workers. That's fine for this
+**Naming clarification:** `RateLimiter` here is a fixed inter-request pacing
+delay, not a shared token bucket. Under sequential crawl the effective rate
+is approximately `1 / delay` (plus fetch latency). That's fine for this
 tool's actual goal (avoid being egregious against the user's own modest
 hosting, not hit an exact QPS target), but the docs/flag help text
 shouldn't imply it's a precise cap.
@@ -762,13 +705,13 @@ extraction and unreliable scoring for that page.
 ## 12. End-to-End Flow Summary
 
 ```
-Crawler.Run(rootCtx, maxDuration, workers)
+Crawler.Run(rootCtx, maxDuration)
   │
   ├─ fetch root URL (special case: failure here → exit 2 immediately)
   ├─ fetch + parse robots.txt (10s timeout, fail-open)
   │
-  └─ spawn N workers (validated ≤ 10, tied to MaxConnsPerHost)
-       └─ per worker, per queued URL:
+  └─ sequential BFS loop (one in-flight fetch; MaxConnsPerHost = 1)
+       └─ per queued URL, until frontier empty or --max-pages reached:
             1. rateLimiter.Wait(ctx)              — ctx-aware, exits clean on cancel
             2. Fetcher.FetchWithRetry(ctx, url):
                  attempt 1: fetchOnce(ctx, url, 15s)
@@ -780,7 +723,8 @@ Crawler.Run(rootCtx, maxDuration, workers)
             3. classify result:
                  ├─ ErrKindCanceled → propagate → Run() exits 2, no report (hard-exit)
                  ├─ other error     → RecordPageError (page-level, continues crawl)
-                 └─ success         → RecordPage
+                 └─ success         → RecordPage; enqueue undiscovered internal links
+            4. incremental Rule 3 check once total ≥ 5 (§7)
   │
   └─ evaluateSystemicFailure(results)
        ├─ root page failed          → exit 2
@@ -804,12 +748,12 @@ Crawler.Run(rootCtx, maxDuration, workers)
 | 4   | Exit-code-2 boundary                       | Root URL unreachable, or >50% page failure rate with ≥5 pages attempted (checked **incrementally**, not only at crawl end); individual page failures scored normally                                          |
 | 5   | Cancellation behavior                      | Hard-exit, no partial report, on root context cancellation (deadline, Ctrl+C, **or SIGTERM**); cause reported on stderr                                                                                       |
 | 6   | Body size cap                              | 2 MB default, via `--max-body-size` flag; truncation detected via a `cap+1`-byte read, recorded as a check finding, applies post-decompression                                                                |
-| 7   | Worker concurrency                         | `--workers` flag, default 4, hard max 10 (both bounds now error explicitly — no silent clamp), wired directly into `MaxConnsPerHost`                                                                          |
+| 7   | Crawl concurrency                          | **Sequential for v1** (no `--workers` flag); `MaxConnsPerHost` / `MaxIdleConnsPerHost` = 1. Deterministic BFS truncation under `--max-pages`. Parallel fetches deferred to v2+ only with level-synchronous admission |
 | —   | `Client.Timeout` / `ResponseHeaderTimeout` | Neither set — per-page context deadlines supersede both entirely (fixing a bug where `ResponseHeaderTimeout: 15s` silently capped every retry attempt)                                                        |
 | —   | Redirects                                  | Capped at 5 hops; loop error is a sentinel (`ErrTooManyRedirects`) classified as non-retryable                                                                                                                |
-| —   | Rate limiter                               | Context-aware (`select` on `ctx.Done()`) per-worker pacing delay, not a shared token bucket — `workers/delay` is an approximate rate, not a hard cap                                                          |
+| —   | Rate limiter                               | Context-aware (`select` on `ctx.Done()`) inter-request pacing delay; effective rate ≈ `1 / delay`                                                                                                             |
 | —   | robots.txt                                 | Own fixed 10s timeout, fail-open on failure; `Crawl-delay` parsed but not applied to pacing in v1                                                                                                             |
-| —   | Frontier/quiescence coordination           | Single-goroutine coordinator owns `seen`/in-flight state; workers talk to it only via channels; `--max-pages` stops new enqueues but lets in-flight fetches finish                                            |
-| —   | Worker → results channel send              | Guarded with `select` on `ctx.Done()` to avoid a worker blocking forever if the consumer stops draining on cancellation                                                                                       |
+| —   | Frontier                                   | Single-goroutine BFS queue + `seen` set; stop when queue empty or `--max-pages` reached (no worker quiescence protocol)                                                                                       |
 
 
+---
