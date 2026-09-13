@@ -491,16 +491,18 @@ having as a regression guard given the stated requirement).
 
 ## Stage 6 prerequisites — Architecture retrofit (Stages 1–2)
 
+**Status: Done** (completed as part of Stage 6).
+
 `docs/crawler-architecture.md` is authoritative for crawl HTTP/context/failure
-behavior. Several of its decisions require **changing already-completed Stage 1
-and Stage 2 surfaces** before the Stage 6 frontier loop is written — the same
-class of dependency as extending Stage 1 config for `--weights` earlier. Do
-this retrofit first; then implement Stage 6 against the updated contracts.
+behavior. Several of its decisions required **changing already-completed Stage 1
+and Stage 2 surfaces** before the Stage 6 frontier loop was written — the same
+class of dependency as extending Stage 1 config for `--weights` earlier.
 
 **Dependency direction:** architecture doc (§2–§7) → retrofit Stage 1/2 code +
-timeline contracts below → then new Stage 6 work (frontier, robots, sequential
-loop). Where the Stage 6 sketch below still shows older shapes, **this
-addendum wins**.
+timeline contracts below → then Stage 6 work (frontier, robots, sequential
+loop). Where older Stage 6 sketches disagreed, **this addendum won**, with
+implementation notes in the status table below for signatures that flexed
+further (`*Fetcher`, robots-inside-`Crawl`).
 
 ### 1. Thread `context.Context` into fetch (and robots)
 
@@ -515,15 +517,17 @@ backoff) only works if every blocking HTTP call uses
 func (f *Fetcher) FetchWithRetry(parent context.Context, rawURL string, rc RetryConfig) (*PageResponse, error)
 ```
 
-`FetchRobots` (new in Stage 6) must take context too — architecture §10 gives
+`FetchRobots` (Stage 6, landed) takes context too — architecture §10 gives
 it a short child timeout from the root ctx:
 
 ```go
-func FetchRobots(ctx context.Context, client *http.Client, siteURL string) (*RobotsPolicy, error)
+func FetchRobots(ctx context.Context, client *http.Client, siteURL, userAgent string) (*RobotsPolicy, error)
 ```
 
 Do not introduce a context-free `Fetch` / `FetchRobots` wrapper for the crawl
-path; Stage 6 must call the context-aware APIs directly.
+path; Stage 6 calls the context-aware APIs directly. Production path: robots
+is fetched **inside** `Crawl` after the root URL (arch §12), not by `cmd`
+beforehand.
 
 ### 2. Extend `CrawlConfig` / flags for architecture fields
 
@@ -572,9 +576,11 @@ type CrawlError struct {
 ```
 
 When recording a failed fetch: `Kind: fe.Kind`, `StatusCode: fe.StatusCode`.
-Parse / non-HTML failures are not `FetchError`s — use a stable message (e.g.
-`"invalid_html"`) without inventing a second enum. Stage 7 broken-link
-reporting reuses `Kind` / `StatusCode`, not a separate string table.
+Parse / non-HTML / truncated-body failures use `ErrKindParseFailure` (added
+to the same enum) plus a stable `Message`. They are recorded in
+`CrawlResult.Errors` but **excluded** from the systemic failure-rate
+denominator (reachability only). Stage 7 broken-link reporting reuses
+`Kind` / `StatusCode`, not a separate string table.
 
 ### 4. `Crawl` return signature, root-URL special case, incremental Rule 3
 
@@ -584,10 +590,17 @@ generic crawl errors → exit 2; it does not define `evaluateSystemicFailure`.
 That logic belongs in the crawler and must surface as a real error to
 `cmd/crawl.go`.
 
-**Required signature:**
+**Required signature** (historical addendum sketch — **superseded**; see
+landed signature note under the status table below):
 
 ```go
 func Crawl(ctx context.Context, client *http.Client, robots *RobotsPolicy, startURL string, opts CrawlOptions) (CrawlResult, error)
+```
+
+Landed form:
+
+```go
+func Crawl(ctx context.Context, fetcher *Fetcher, startURL string, opts CrawlOptions) (CrawlResult, error)
 ```
 
 - `(result, nil)` — crawl completed (possibly with page-level errors); caller
@@ -601,36 +614,46 @@ func Crawl(ctx context.Context, client *http.Client, robots *RobotsPolicy, start
 1. **Root URL special case:** fetch `startURL` before the general BFS loop.
    Failure → return systemic error immediately (exit 2). Do not treat the root
    as just `queue[0]` with the same page-level handling as deep links.
-2. **Incremental Rule 3:** after each attempted page, once `total >= 5`, if
-   `failRate > 0.5`, return a distinguishable systemic error (e.g. wrap or
-   sentinel `ErrSystemicFailureRate`) so the site stops burning
-   `--max-duration` / retry budget. Final `evaluateSystemicFailure` at the end
-   remains a safety net.
+2. **Incremental failure-rate check (arch §7 Rule 3):** after each attempted
+   page, once `total >= 5`, if `failRate > 0.5`, return a distinguishable
+   systemic error (`ErrSystemicFailureRate`) so the site stops burning
+   `--max-duration` / retry budget. Final end-of-crawl check remains a safety
+   net (`checkSystemicFailureRate` in `frontier.go`).
 3. **`ErrKindCanceled`:** propagate immediately as `err` (hard-exit, no
-   report) — same exit-2 path as root failure / Rule 3.
+   report) — same exit-2 path as root failure / failure-rate stop.
 
 Stage 9 then only needs: `err != nil` → exit 2; else score/regression gates →
 exit 0/1. It should not re-implement failure-rate math.
 
 ### Already landed vs still TODO (repo check)
 
-| Prerequisite | Status (as of this addendum) |
+| Prerequisite | Status |
 | --- | --- |
-| Context-aware `FetchWithRetry` + `FetchErrorKind` | Done in `internal/crawler` |
-| `--max-body-size` / `CrawlConfig.MaxBodySize` | Done |
-| `--max-duration` + `NewCrawlContext` | Still TODO (Stage 6 / cmd wiring) |
-| `FetchRobots(ctx, …)` | Still TODO |
-| `CrawlError` ← `FetchErrorKind` | Still TODO (no `Crawl` yet) |
-| `Crawl(ctx, …) (CrawlResult, error)` + root / Rule 3 | Still TODO |
+| Context-aware `FetchWithRetry` + `FetchErrorKind` | **Done** |
+| `--max-body-size` / `CrawlConfig.MaxBodySize` | **Done** |
+| `--max-duration` + `NewCrawlContext` | **Done** (Stage 6) |
+| `FetchRobots(ctx, …)` | **Done** (Stage 6; fail-open, always non-nil policy) |
+| `CrawlError` ← `FetchErrorKind` (+ `ErrKindParseFailure`) | **Done** (Stage 6) |
+| `Crawl(ctx, …) (CrawlResult, error)` + root / Rule 3 | **Done** (Stage 6) |
+| `FailBelow` / `Baseline` / `MaxScoreDrop` on `CrawlConfig` | Deferred to Stage 9 |
 
 **Also supersedes** the Stage 6 “v1: log and skip, don’t retry” note below:
 retries follow architecture §5 (already implemented on the fetcher).
+
+**Landed signature note:** the addendum’s
+`Crawl(ctx, client, robots, …)` sketch was superseded in implementation by
+`Crawl(ctx, fetcher *Fetcher, startURL, opts)` — retry config lives on the
+`Fetcher`; robots is fetched inside `Crawl` after the root special case
+(arch §12), not passed in by the caller. `CrawlOptions` does **not** store
+a `context.Context` (root ctx is the first parameter only).
 
 ---
 
 
 
 ## Stage 6 — Crawl Engine (Frontier, robots.txt, Rate Limiting)
+
+**Status: Done.**
 
 **Goal:** The real multi-page crawler: BFS frontier, robots.txt compliance,
 depth/page limits, rate limiting, error classification. This is the
@@ -659,32 +682,28 @@ larger sites.
 architecture §5); do not invent a parallel string taxonomy — see
 prerequisites §3
 
-**Work:**
+**Work (landed):**
 
-`internal/crawler/robots.go`:
+| File | Role |
+| --- | --- |
+| `internal/crawler/context.go` | `NewCrawlContext` (SIGINT + SIGTERM) |
+| `internal/crawler/ratelimiter.go` | Context-aware inter-request delay |
+| `internal/crawler/robots.go` | `RobotsPolicy` + `FetchRobots` (`temoto/robotstxt`) |
+| `internal/crawler/frontier.go` | `Crawl`, `CrawlResult`, incremental failure-rate stop |
+| `cmd/crawl.go` | Interim wiring: context → fetcher → crawl → text summary |
 
 ```go
 package crawler
 
 type RobotsPolicy struct {
-	group *robotstxt.Group
+	group    *robotstxt.Group
+	allowAll bool
 }
 
-func FetchRobots(ctx context.Context, client *http.Client, siteURL string) (*RobotsPolicy, error) {
-	// GET /robots.txt under a short child of ctx (arch §10, ~10s); on fetch
-	// failure, "fail safely" per spec — for v1, fail safe = allow all (log a
-	// warning), since blocking the whole crawl because robots.txt is
-	// unreachable is worse for a QA tool than the (documented) risk of
-	// crawling a page robots.txt would have disallowed.
-}
+// Always returns a non-nil policy; on failure returns allow-all + err for logging.
+func FetchRobots(ctx context.Context, client *http.Client, siteURL, userAgent string) (*RobotsPolicy, error)
 
-func (p *RobotsPolicy) Allowed(path string) bool { ... }
-```
-
-`internal/crawler/frontier.go`:
-
-```go
-package crawler
+func (p *RobotsPolicy) Allowed(path string) bool
 
 type CrawlResult struct {
 	Pages  []CrawledPage
@@ -698,7 +717,6 @@ type CrawledPage struct {
 	FetchTime time.Duration
 }
 
-// CrawlError — see Stage 6 prerequisites §3 (Kind from FetchErrorKind, not a free string).
 type CrawlError struct {
 	URL        string
 	Kind       FetchErrorKind
@@ -710,33 +728,38 @@ type CrawlOptions struct {
 	MaxPages int
 	MaxDepth int
 	Delay    time.Duration
+	Robots   *RobotsPolicy // tests only; production path fetches robots inside Crawl
 }
 
 // Returns (result, nil) on normal completion; (result, err) on systemic stop
-// (root failure, Rule 3, cancellation). See prerequisites §4.
-func Crawl(ctx context.Context, client *http.Client, robots *RobotsPolicy, startURL string, opts CrawlOptions) (CrawlResult, error) {
-	// 1. Fetch root URL first — failure → return systemic err (exit 2).
-	// 2. Sequential BFS: rateLimiter.Wait(ctx) then FetchWithRetry(ctx, ...).
-	// 3. Record page errors via FetchErrorKind; enqueue internal links.
-	// 4. After each attempt with total >= 5, incremental Rule 3 → systemic err.
-	// 5. ErrKindCanceled → return err immediately (no report).
-	// Full loop sketch deferred to implementation; older queue-only sketch
-	// omitted here so it cannot drift from the prerequisites.
-}
+// (root failure, >50% fetch failure rate, cancellation).
+func Crawl(ctx context.Context, fetcher *Fetcher, startURL string, opts CrawlOptions) (CrawlResult, error)
 ```
 
-**Testing:** this is the one place `httptest.Server` earns its keep — spin up
-a local test server serving a small fixture site (3–4 linked pages, one
-robots.txt-disallowed page, one broken link, one 500) and assert the crawler
-visits exactly the right set, respects `max-pages`/`max-depth`, and
-classifies errors correctly. Also assert: root URL down → error return;
-sustained >50% failures with ≥5 attempts → early systemic error (does not
-exhaust the full page budget). This is more valuable than mocking `Fetch`
-directly because it exercises the real HTTP + robots.txt path together.
+**Loop behavior (as implemented):**
 
-**Exit criteria:** crawler test suite passes against the local `httptest`
-fixture server; manual run against a real small site completes without
-hanging and respects `--delay`.
+1. Fetch root URL first — any fetch failure → systemic err (exit-2 path).
+2. Then `FetchRobots` (fail-open); root ignores robots gate; discovered links
+   are gated at enqueue time on resolved path+query (not the Normalize key).
+3. Sequential BFS: `rateLimiter.Wait(ctx)` then `FetchWithRetry`.
+4. Record fetch errors via `FetchErrorKind`; parse/non-HTML/truncated →
+   `ErrKindParseFailure` in `Errors` (excluded from failure-rate math).
+5. After each failed fetch with `attempts >= 5`, if fail rate > 50% →
+   `ErrSystemicFailureRate`.
+6. `ErrKindCanceled` → return err immediately (no report).
+7. `seen` seeded with **normalized** root; frontier re-derives internal links
+   via `ResolveURL` + `SameDomain` (does not trust `parser.Link.Internal`).
+
+**Testing:** `httptest` fixture in `frontier_test.go` / `robots_test.go` —
+linked pages, robots disallow, 500s, root-down, Rule-3 early exit, max-pages/
+max-depth, cancel, delay, determinism. Injectable millisecond `RetryConfig`
+and `Delay` keep the suite fast.
+
+**Exit criteria:** ✅ crawler tests green against the fixture server; ✅
+manual run against a real small site completes and respects `--delay`.
+
+**Still deferred to later stages:** full JSON report + exit-code wiring
+(Stages 8–9); `FailBelow` / baseline flags on `CrawlConfig` (Stage 9).
 
 ---
 
@@ -1078,24 +1101,24 @@ No LLM-suggestion layer is planned at all for this tool.
 ## Suggested Build Order Summary
 
 
-| Stage                 | Depends on | Can be tested in isolation?                |
-| --------------------- | ---------- | ------------------------------------------ |
-| 0. Scaffolding        | —          | trivially                                  |
-| 1. CLI flags          | 0          | yes (manual)                               |
-| 2. Fetch + Parse      | 0          | yes, fully unit-testable                   |
-| 3. URL normalize      | 0          | yes, fully unit-testable                   |
-| 4. Checks             | 2          | yes, fully unit-testable                   |
-| 5. Scoring            | 4          | yes, fully unit-testable                   |
-| 6. Crawl engine       | 2, 3       | yes, via httptest fixture server           |
-| 7. Site-wide analysis | 6          | yes, via httptest fixture server           |
-| 8. Reporting          | 5, 7       | yes, golden-file test                      |
-| 9. Exit codes         | 8          | manual/integration                         |
-| 10. Regression        | 8          | yes, fully unit-testable                   |
-| 11. CI integration    | 9, 10      | integration only, needs runner-side prereq |
-| 12. Validation & docs | 11         | manual                                     |
-| 13. v2 backlog        | —          | n/a                                        |
+| Stage                 | Status | Depends on | Can be tested in isolation?                |
+| --------------------- | ------ | ---------- | ------------------------------------------ |
+| 0. Scaffolding        | Done   | —          | trivially                                  |
+| 1. CLI flags          | Done   | 0          | yes (manual)                               |
+| 2. Fetch + Parse      | Done   | 0          | yes, fully unit-testable                   |
+| 3. URL normalize      | Done   | 0          | yes, fully unit-testable                   |
+| 4. Checks             | Done   | 2          | yes, fully unit-testable                   |
+| 5. Scoring            | Done   | 4          | yes, fully unit-testable                   |
+| 6. Crawl engine       | Done   | 2, 3       | yes, via httptest fixture server           |
+| 7. Site-wide analysis | Next   | 6          | yes, via httptest fixture server           |
+| 8. Reporting          | TODO   | 5, 7       | yes, golden-file test                      |
+| 9. Exit codes         | TODO   | 8          | manual/integration                         |
+| 10. Regression        | TODO   | 8          | yes, fully unit-testable                   |
+| 11. CI integration    | TODO   | 9, 10      | integration only, needs runner-side prereq |
+| 12. Validation & docs | TODO   | 11         | manual                                     |
+| 13. v2 backlog        | —      | —          | n/a                                        |
 
 
 Stages 2–5 and 10 are the ones you can build and fully unit-test with zero
-network access — front-load those if you want fast, isolated progress before
-tackling the crawler's integration-test complexity in Stage 6.
+network access. Stage 6 is complete; next is Stage 7 (site-wide checks over
+`CrawlResult`).
