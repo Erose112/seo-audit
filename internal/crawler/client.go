@@ -17,13 +17,15 @@ var ErrTooManyRedirects = errors.New("stopped after 5 redirects")
 
 // NewClient builds the single client shared by every request in a crawl. All
 // requests target one host, so connection reuse is worth the shared transport.
+// Transport timeouts and connection caps are fixed (arch §3); User-Agent and
+// body limits live on Fetcher, not here.
 //
 // Neither Client.Timeout nor Transport.ResponseHeaderTimeout is set: both are
 // per-client, not per-request, so either one would silently cap every retry at
 // the same value and defeat the escalating per-attempt timeouts in
 // FetchWithRetry. The context deadline passed into each attempt is the only
 // timeout mechanism for request latency.
-func NewClient(cfg Config) *http.Client {
+func NewClient() *http.Client {
 	transport := &http.Transport{
 		DialContext: (&net.Dialer{
 			Timeout:   5 * time.Second,

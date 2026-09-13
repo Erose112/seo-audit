@@ -83,7 +83,9 @@ so connection reuse matters).
 ```go
 var ErrTooManyRedirects = errors.New("stopped after 5 redirects")
 
-func NewClient(cfg Config) *http.Client {
+// NewClient takes no Config: transport timeouts/caps are fixed (below).
+// User-Agent, MaxBodySize, and Retry live on Fetcher via crawler.Config.
+func NewClient() *http.Client {
     transport := &http.Transport{
         DialContext: (&net.Dialer{
             Timeout:   5 * time.Second,
@@ -174,55 +176,21 @@ and no `--workers` CLI flag. Pacing is a context-aware delay between
 requests (§9); transport connection caps are fixed at 1 to match (§3).
 
 ```go
-func (c *Crawler) crawl(ctx context.Context, root string, opts CrawlOptions) (*CrawlResults, error) {
-    type queueItem struct {
-        url   string
-        depth int
-    }
-    queue := []queueItem{{root, 0}}
-    seen := map[string]bool{root: true}
-
-    for len(queue) > 0 && c.results.PageCount() < opts.MaxPages {
-        if err := ctx.Err(); err != nil {
-            return nil, err // hard-exit path — §8
-        }
-
-        item := queue[0]
-        queue = queue[1:]
-
-        if err := c.rateLimiter.Wait(ctx); err != nil {
-            return nil, err // root cancelled during delay
-        }
-
-        resp, err := c.fetcher.FetchWithRetry(ctx, item.url, c.cfg.Retry)
-        if err != nil {
-            var fe *FetchError
-            if errors.As(err, &fe) && fe.Kind == ErrKindCanceled {
-                return nil, err // propagate — Run() exits 2, no report
-            }
-            c.results.RecordPageError(item.url, err)
-            continue
-        }
-        c.results.RecordPage(resp)
-
-        if item.depth >= opts.MaxDepth {
-            continue
-        }
-        for _, link := range extractInternalLinks(resp) {
-            if seen[link] {
-                continue
-            }
-            seen[link] = true
-            queue = append(queue, queueItem{link, item.depth + 1})
-        }
-    }
-    return c.results, nil
+// Public Stage 6 API (landed). Internally sequential BFS; not a *Crawler method.
+func Crawl(ctx context.Context, fetcher *Fetcher, startURL string, opts CrawlOptions) (CrawlResult, error) {
+    // 1. Normalize startURL → seed seen; fetch root (any failure → systemic).
+    // 2. FetchRobots (fail-open); enqueue root links (robots + SameDomain + seen).
+    // 3. Sequential BFS until queue empty or MaxPages reached:
+    //      rateLimiter.Wait(ctx) → FetchWithRetry → record / enqueue
+    //      incremental checkSystemicFailureRate once attempts >= 5
+    // 4. ErrKindCanceled propagates immediately.
 }
 ```
 
-This is a sketch of the Stage 6 shape (aligns with `development-timeline.md`),
-not final code — robots.txt gating, URL normalization before `seen`, and
-systemic-failure checks (§7) still need wiring. The important architectural
+**Status (Stage 6 landed):** the public API is the free function above, not a
+`*Crawler` method. Root is fetched before robots and before the BFS loop
+(§12 / prerequisites). Robots gating, `Normalize` before `seen`, and
+incremental `checkSystemicFailureRate` are wired. The important architectural
 points:
 
 - **Deterministic truncation under `--max-pages`:** queue order depends only
@@ -417,6 +385,9 @@ const (
     ErrKindPermanent // deterministic, non-network failure (DNS NXDOMAIN, redirect loop) —
                       // retrying can't produce a different outcome
     ErrKindCanceled  // parent/root context died — always systemic
+    // ErrKindParseFailure: HTTP succeeded but body is non-HTML, truncated, or
+    // unparseable. Recorded on CrawlResult.Errors; excluded from §7 fail-rate.
+    ErrKindParseFailure
 )
 
 type FetchError struct {
@@ -530,11 +501,13 @@ were attempted) should be logged per page so a human investigating an
 exit-2 CI failure isn't left guessing why.
 
 **Clarification: what counts toward** `PagesFailed`**.** Only pages that were
-actually fetched and returned a non-nil error count —
+actually fetched and returned a non-nil **fetch** error count —
 pages never reached because `--max-pages` or `--max-depth` cut the frontier
 off first are neither crawled nor failed, and must not be added to either
 side of the Rule 3 ratio (they'd dilute or inflate `failRate` for reasons
-unrelated to reachability).
+unrelated to reachability). Parse / non-HTML / truncated bodies
+(`ErrKindParseFailure`) are also excluded: the HTTP layer succeeded; Rule 3
+is about site reachability, not markup quality.
 
 ### Revision: check Rule 3 incrementally, not only at the end
 
@@ -641,6 +614,12 @@ timeout model in §5, since it's fetched once at crawl start and a slow
 `robots.txt` shouldn't consume page-level budget. Per §7 Rule 2, failure to
 fetch it is treated as "no restrictions found," not a systemic error.
 
+**Landed (Stage 6):** `FetchRobots(ctx, client, siteURL, userAgent)` in
+`robots.go` using `github.com/temoto/robotstxt`. Always returns a non-nil
+`*RobotsPolicy` (allow-all on failure). Called inside `Crawl` **after** the
+root fetch. Does not use `FromStatusAndBytes` (its 5xx → disallow-all
+conflicts with fail-open); non-2xx and network errors fail open.
+
 **Decision:** `robots.txt`**'s** `Crawl-delay` **directive is parsed for**
 `Disallow`**/**`Allow` **rules but not applied to pacing in v1.** Both it and
 `--delay` serve the same "don't overload the target" goal, but honoring a
@@ -693,10 +672,10 @@ it's an easy thing for an implementer to assume is measured against wire
 bytes instead.
 
 **Handling truncation:** if the read hits the cap (the `cap+1`-byte read
-above actually consumed that extra byte), the page is recorded as a
-distinct check finding ("page exceeds size limit") rather than being fed
-truncated/malformed HTML into GoQuery, which risks silent garbage
-extraction and unreliable scoring for that page.
+above actually consumed that extra byte), the page sets
+`PageResponse.Truncated` (landed). The crawl records
+`ErrKindParseFailure` rather than feeding truncated HTML into the parser;
+Stage 7 may later surface this as a dedicated check finding.
 
 ---
 
@@ -704,16 +683,19 @@ extraction and unreliable scoring for that page.
 
 ## 12. End-to-End Flow Summary
 
+**Status:** Stage 6 landed this flow in `cmd/crawl.go` + `crawler.Crawl`.
+Full scoring / JSON report / exit-code mapping remains Stages 7–9.
+
 ```
-Crawler.Run(rootCtx, maxDuration)
+cmd/crawl: NewCrawlContext(maxDuration) → NewFetcher(NewClient(), cfg) → Crawl
   │
-  ├─ fetch root URL (special case: failure here → exit 2 immediately)
-  ├─ fetch + parse robots.txt (10s timeout, fail-open)
+  ├─ fetch root URL (special case: failure here → systemic err immediately)
+  ├─ fetch + parse robots.txt (10s timeout, fail-open; root ignores robots)
   │
   └─ sequential BFS loop (one in-flight fetch; MaxConnsPerHost = 1)
        └─ per queued URL, until frontier empty or --max-pages reached:
             1. rateLimiter.Wait(ctx)              — ctx-aware, exits clean on cancel
-            2. Fetcher.FetchWithRetry(ctx, url):
+            2. Fetcher.FetchWithRetry(ctx, url, retry):
                  attempt 1: fetchOnce(ctx, url, 15s)
                    ├─ success → done
                    └─ fail → isRetryable?
@@ -721,16 +703,14 @@ Crawler.Run(rootCtx, maxDuration)
                         └─ yes → backoff, escalate timeout ×1.5, retry
                               (max 2 retries, ≤90s total per page, enforced)
             3. classify result:
-                 ├─ ErrKindCanceled → propagate → Run() exits 2, no report (hard-exit)
-                 ├─ other error     → RecordPageError (page-level, continues crawl)
-                 └─ success         → RecordPage; enqueue undiscovered internal links
-            4. incremental Rule 3 check once total ≥ 5 (§7)
+                 ├─ ErrKindCanceled → propagate → exit 2, no report (hard-exit)
+                 ├─ other fetch error → append CrawlError; continue
+                 ├─ parse/non-HTML/truncated → ErrKindParseFailure (not fail-rate)
+                 └─ success → append CrawledPage; enqueue undiscovered internal links
+                      (ResolveURL + SameDomain; robots on path+query; seen = Normalize)
+            4. checkSystemicFailureRate once attempts ≥ 5 (§7)
   │
-  └─ evaluateSystemicFailure(results)
-       ├─ root page failed          → exit 2
-       ├─ failure rate > 50% (n≥5)  → exit 2
-       └─ otherwise                 → proceed to scoring/report (exit 0 or 1
-                                       decided by --fail-below downstream)
+  └─ (Stage 9) map Crawl err → exit 2; else score/regression → exit 0 or 1
 ```
 
 ---
@@ -747,13 +727,14 @@ Crawler.Run(rootCtx, maxDuration)
 | 3   | Retries                                    | Enabled, max 2 retries (3 attempts), exponential backoff, only for timeout/connection/429/5xx errors — **not** DNS-not-found, TLS/cert errors, or redirect loops                                              |
 | 4   | Exit-code-2 boundary                       | Root URL unreachable, or >50% page failure rate with ≥5 pages attempted (checked **incrementally**, not only at crawl end); individual page failures scored normally                                          |
 | 5   | Cancellation behavior                      | Hard-exit, no partial report, on root context cancellation (deadline, Ctrl+C, **or SIGTERM**); cause reported on stderr                                                                                       |
-| 6   | Body size cap                              | 2 MB default, via `--max-body-size` flag; truncation detected via a `cap+1`-byte read, recorded as a check finding, applies post-decompression                                                                |
+| 6   | Body size cap                              | 2 MB default, via `--max-body-size` flag; truncation detected via a `cap+1`-byte read (`PageResponse.Truncated`), recorded as a check finding later; applies post-decompression                               |
 | 7   | Crawl concurrency                          | **Sequential for v1** (no `--workers` flag); `MaxConnsPerHost` / `MaxIdleConnsPerHost` = 1. Deterministic BFS truncation under `--max-pages`. Parallel fetches deferred to v2+ only with level-synchronous admission |
 | —   | `Client.Timeout` / `ResponseHeaderTimeout` | Neither set — per-page context deadlines supersede both entirely (fixing a bug where `ResponseHeaderTimeout: 15s` silently capped every retry attempt)                                                        |
 | —   | Redirects                                  | Capped at 5 hops; loop error is a sentinel (`ErrTooManyRedirects`) classified as non-retryable                                                                                                                |
 | —   | Rate limiter                               | Context-aware (`select` on `ctx.Done()`) inter-request pacing delay; effective rate ≈ `1 / delay`                                                                                                             |
-| —   | robots.txt                                 | Own fixed 10s timeout, fail-open on failure; `Crawl-delay` parsed but not applied to pacing in v1                                                                                                             |
-| —   | Frontier                                   | Single-goroutine BFS queue + `seen` set; stop when queue empty or `--max-pages` reached (no worker quiescence protocol)                                                                                       |
+| —   | robots.txt                                 | Own fixed 10s timeout, fail-open on failure; `Crawl-delay` parsed but not applied to pacing in v1; shared User-Agent with Fetcher                                                                              |
+| —   | Frontier                                   | Public `Crawl(ctx, *Fetcher, …)` free function; root-then-robots-then-BFS; `seen` via `Normalize`; stop when queue empty or `--max-pages` reached                                                              |
+| —   | `NewClient`                                | No `Config` arg — transport knobs are fixed; UA / body / retry belong on `Fetcher`                                                                                                                            |
 
 
 ---

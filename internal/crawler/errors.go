@@ -23,7 +23,14 @@ const (
 	ErrKindPermanent
 	// ErrKindCanceled means the root context died. Always systemic.
 	ErrKindCanceled
+	// ErrKindParseFailure means the page fetched but could not be parsed or was
+	// not HTML. Recorded in CrawlResult.Errors; excluded from Rule 3 fail-rate.
+	ErrKindParseFailure
 )
+
+// ErrSystemicFailureRate is returned when more than half of fetch attempts fail
+// after at least five have been tried.
+var ErrSystemicFailureRate = errors.New("failure rate exceeds 50%")
 
 func (k FetchErrorKind) String() string {
 	switch k {
@@ -39,8 +46,18 @@ func (k FetchErrorKind) String() string {
 		return "permanent"
 	case ErrKindCanceled:
 		return "canceled"
+	case ErrKindParseFailure:
+		return "parse_failure"
 	}
 	return "unknown"
+}
+
+// CrawlError records a page-level failure for reporting.
+type CrawlError struct {
+	URL        string
+	Kind       FetchErrorKind
+	StatusCode int
+	Message    string
 }
 
 type FetchError struct {

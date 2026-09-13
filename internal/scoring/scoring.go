@@ -1,6 +1,4 @@
-// Package scoring turns check results into a 0-100 score. It is pure and
-// stateless: no clock, no I/O, no map iteration, so the same results always
-// produce the same score (a stated non-functional requirement).
+// Package scoring turns check results into a 0-100 score. It is deterministic.
 package scoring
 
 import "github.com/Erose112/seo-audit/internal/checks"
@@ -42,9 +40,7 @@ func ScorePage(results []checks.CheckResult, w Weights) int {
 }
 
 // ScoreSite averages page scores with integer division, so the result is
-// truncated rather than rounded: 89.9 reports as 89. Truncating biases the
-// site score down, which fails the CI gate slightly early rather than slightly
-// late. An empty crawl scores 0 — there is no evidence the site is healthy.
+// truncated rather than rounded.
 func ScoreSite(pageScores []int) int {
 	if len(pageScores) == 0 {
 		return 0

@@ -204,6 +204,15 @@ func (f *Fetcher) userAgent() string {
 	return f.cfg.UserAgent
 }
 
+// Client returns the shared HTTP client used by this fetcher.
+func (f *Fetcher) Client() *http.Client { return f.client }
+
+// UserAgent returns the User-Agent string sent on every request.
+func (f *Fetcher) UserAgent() string { return f.userAgent() }
+
+// RetryConfig returns the validated retry schedule for this fetcher.
+func (f *Fetcher) RetryConfig() RetryConfig { return f.cfg.Retry }
+
 // maxBodySize applies to decompressed bytes: http.Transport gzip-decodes
 // transparently, so this is never measured against wire size.
 func (f *Fetcher) maxBodySize() int64 {
