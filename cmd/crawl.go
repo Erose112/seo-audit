@@ -6,7 +6,6 @@ import (
 
 	"github.com/Erose112/seo-audit/internal/config"
 	"github.com/Erose112/seo-audit/internal/crawler"
-	"github.com/Erose112/seo-audit/internal/parser"
 	"github.com/spf13/cobra"
 )
 
@@ -17,63 +16,47 @@ var crawlCmd = &cobra.Command{
 	Short:        "Crawl a site and produce an SEO audit report",
 	SilenceUsage: true,
 	RunE: func(cmd *cobra.Command, args []string) error {
-		// Stage 2: single-page fetch and parse. The frontier, robots.txt and
-		// sequential BFS loop replace this in Stage 6.
+		ctx, cancel := crawler.NewCrawlContext(crawlCfg.MaxDuration)
+		defer cancel()
+
 		cfg := crawler.DefaultConfig()
 		if crawlCfg.MaxBodySize > 0 {
 			cfg.MaxBodySize = crawlCfg.MaxBodySize
 		}
 
-		fetcher, err := crawler.NewFetcher(crawler.NewClient(cfg), cfg)
+		fetcher, err := crawler.NewFetcher(crawler.NewClient(), cfg)
 		if err != nil {
 			return err
-		}
-		page, err := fetcher.FetchWithRetry(cmd.Context(), crawlCfg.URL, cfg.Retry)
-		if err != nil {
-			return fmt.Errorf("fetch %s: %w", crawlCfg.URL, err)
-		}
-		if !crawler.IsHTML(page.ContentType) {
-			return fmt.Errorf("fetch %s: content type %q is not HTML", crawlCfg.URL, page.ContentType)
-		}
-		if page.Truncated {
-			return fmt.Errorf("fetch %s: body exceeds the %d byte limit", crawlCfg.URL, cfg.MaxBodySize)
 		}
 
-		data, err := parser.Parse(page.FinalURL, page.Body)
+		result, err := crawler.Crawl(ctx, fetcher, crawlCfg.URL, crawler.CrawlOptions{
+			MaxPages: crawlCfg.MaxPages,
+			MaxDepth: crawlCfg.MaxDepth,
+			Delay:    crawlCfg.Delay,
+		})
 		if err != nil {
 			return err
 		}
-		printPageData(cmd, page, data)
+
+		printCrawlSummary(cmd, result)
 		return nil
 	},
 }
 
-func printPageData(cmd *cobra.Command, page *crawler.PageResponse, data parser.PageData) {
+func printCrawlSummary(cmd *cobra.Command, result crawler.CrawlResult) {
 	out := cmd.OutOrStdout()
-	fmt.Fprintf(out, "URL:              %s\n", data.URL)
-	fmt.Fprintf(out, "Status:           %d (%s, %s)\n", page.StatusCode, page.ContentType, page.Duration.Round(time.Millisecond))
-	fmt.Fprintf(out, "Title:            %q\n", data.Title)
-	fmt.Fprintf(out, "Meta description: %q\n", data.MetaDescription)
-	fmt.Fprintf(out, "Canonical:        %q\n", data.Canonical)
-	fmt.Fprintf(out, "Viewport:         %q\n", data.Viewport)
-	fmt.Fprintf(out, "H1 count:         %d %v\n", data.H1Count, data.H1Text)
-	fmt.Fprintf(out, "Word count:       %d\n", data.WordCount)
-
-	missingAlt := 0
-	for _, img := range data.Images {
-		if !img.HasAlt {
-			missingAlt++
+	fmt.Fprintf(out, "Pages crawled: %d\n", len(result.Pages))
+	fmt.Fprintf(out, "Page errors:   %d\n", len(result.Errors))
+	for _, p := range result.Pages {
+		fmt.Fprintf(out, "  [%d] %s — %q\n", p.Depth, p.URL, p.Data.Title)
+	}
+	for _, e := range result.Errors {
+		if e.StatusCode > 0 {
+			fmt.Fprintf(out, "  error: %s — %s (%d): %s\n", e.URL, e.Kind, e.StatusCode, e.Message)
+		} else {
+			fmt.Fprintf(out, "  error: %s — %s: %s\n", e.URL, e.Kind, e.Message)
 		}
 	}
-	fmt.Fprintf(out, "Images:           %d (%d missing alt attr)\n", len(data.Images), missingAlt)
-
-	internal := 0
-	for _, link := range data.Links {
-		if link.Internal {
-			internal++
-		}
-	}
-	fmt.Fprintf(out, "Links:            %d (%d internal, %d external)\n", len(data.Links), internal, len(data.Links)-internal)
 }
 
 func init() {
@@ -81,6 +64,7 @@ func init() {
 	crawlCmd.Flags().IntVar(&crawlCfg.MaxPages, "max-pages", 100, "max pages to crawl")
 	crawlCmd.Flags().IntVar(&crawlCfg.MaxDepth, "max-depth", 5, "max crawl depth")
 	crawlCmd.Flags().DurationVar(&crawlCfg.Delay, "delay", 200*time.Millisecond, "delay between requests")
+	crawlCmd.Flags().DurationVar(&crawlCfg.MaxDuration, "max-duration", 5*time.Minute, "max wall-clock time for the crawl")
 	crawlCmd.Flags().Int64Var(&crawlCfg.MaxBodySize, "max-body-size", crawler.DefaultMaxBodySize, "max response body bytes to read per page")
 	crawlCmd.Flags().StringVar(&crawlCfg.Output, "output", "text", "text|json")
 	crawlCmd.MarkFlagRequired("url")
