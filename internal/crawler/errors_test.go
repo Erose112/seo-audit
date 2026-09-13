@@ -80,6 +80,29 @@ func TestClassifyFetchErrorPassthrough(t *testing.T) {
 	}
 }
 
+func TestFetchErrorKindString(t *testing.T) {
+	cases := []struct {
+		kind FetchErrorKind
+		want string
+	}{
+		{ErrKindTimeout, "timeout"},
+		{ErrKindConnection, "connection"},
+		{ErrKindTLS, "tls"},
+		{ErrKindHTTPStatus, "http_status"},
+		{ErrKindPermanent, "permanent"},
+		{ErrKindCanceled, "canceled"},
+		{ErrKindParseFailure, "parse_failure"},
+		{FetchErrorKind(99), "unknown"},
+	}
+	for _, c := range cases {
+		t.Run(c.want, func(t *testing.T) {
+			if got := c.kind.String(); got != c.want {
+				t.Errorf("String() = %q, want %q", got, c.want)
+			}
+		})
+	}
+}
+
 func TestIsRetryable(t *testing.T) {
 	cases := []struct {
 		name string

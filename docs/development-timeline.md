@@ -792,30 +792,40 @@ type SiteResult struct {
 }
 
 type BrokenLink struct {
-	SourceURL string
-	TargetURL string
-	Reason    string // reuses crawler.CrawlError reasons where applicable
+	SourceURL  string
+	TargetURL  string
+	Kind       crawler.FetchErrorKind
+	StatusCode int    // meaningful when Kind == ErrKindHTTPStatus
+	Message    string // populated for ErrKindParseFailure; optional otherwise
 }
 
 func FindDuplicateTitles(pages []crawler.CrawledPage) map[string][]string { ... }
 func FindBrokenLinks(pages []crawler.CrawledPage, crawlErrors []crawler.CrawlError) []BrokenLink { ... }
 ```
 
+`FindBrokenLinks` resolves link targets via `ResolveURL` + `SameDomain` +
+`Normalize` (same as the frontier); it does not trust `parser.Link.Internal`.
+Only targets with a matching `CrawlError` are flagged — uncrawled links
+(budget, robots-disallow, undiscovered) are not broken.
+
 `internal/report/summary.go`:
 
 ```go
 type Summary struct {
-	PagesCrawled   int
-	PagesWithErrors int
-	BrokenLinks    int
-	DuplicateTitles int
-	AverageScore   int
+	PagesCrawled    int
+	PagesWithErrors int // len(crawlResult.Errors), including parse failures
+	BrokenLinks     int
+	DuplicateTitles int // len(DuplicateTitles map), not page count
+	AverageScore    int
 }
+
+func BuildSummary(cr crawler.CrawlResult, sr checks.SiteResult, pageScores []int) Summary { ... }
 ```
 
-**Exit criteria:** against the Stage 6 fixture server (which should include a
-deliberate duplicate-title page and a broken internal link), the site-wide
-checks correctly flag both.
+**Exit criteria:** `go test ./internal/checks/...` and
+`go test ./internal/report/...` green; integration test against a dedicated
+httptest fixture flags duplicate titles, a 404 broken link, and a parse-failure
+broken link; robots-disallowed targets are not flagged.
 
 ---
 
@@ -851,6 +861,8 @@ type Report struct {
 	Checks       []CheckSummary  `json:"checks"`
 	Pages        []PageReport    `json:"pages"`
 	Summary      Summary         `json:"summary"`
+	// TODO(stage-8): add SiteIssues checks.SiteResult `json:"site_issues"` so
+	// per-URL duplicate-title and broken-link detail is not lost behind counts.
 }
 
 type PageReport struct {
@@ -1110,7 +1122,7 @@ No LLM-suggestion layer is planned at all for this tool.
 | 4. Checks             | Done   | 2          | yes, fully unit-testable                   |
 | 5. Scoring            | Done   | 4          | yes, fully unit-testable                   |
 | 6. Crawl engine       | Done   | 2, 3       | yes, via httptest fixture server           |
-| 7. Site-wide analysis | Next   | 6          | yes, via httptest fixture server           |
+| 7. Site-wide analysis | Done   | 6          | yes, via httptest fixture server           |
 | 8. Reporting          | TODO   | 5, 7       | yes, golden-file test                      |
 | 9. Exit codes         | TODO   | 8          | manual/integration                         |
 | 10. Regression        | TODO   | 8          | yes, fully unit-testable                   |
@@ -1120,5 +1132,5 @@ No LLM-suggestion layer is planned at all for this tool.
 
 
 Stages 2–5 and 10 are the ones you can build and fully unit-test with zero
-network access. Stage 6 is complete; next is Stage 7 (site-wide checks over
-`CrawlResult`).
+network access. Stage 7 is complete; next is Stage 8 (reporting over
+`CrawlResult` + `SiteResult`).
