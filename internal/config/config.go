@@ -7,6 +7,7 @@ type CrawlConfig struct {
 	MaxPages    int
 	MaxDepth    int
 	Delay       time.Duration
+	MaxDuration time.Duration
 	MaxBodySize int64
 	Output      string // "text" | "json"
 }

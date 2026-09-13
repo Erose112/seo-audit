@@ -29,7 +29,7 @@ func newTestFetcher(t *testing.T, cfg Config, handler http.HandlerFunc) (*Fetche
 	t.Helper()
 	srv := httptest.NewServer(handler)
 	t.Cleanup(srv.Close)
-	f, err := NewFetcher(NewClient(cfg), cfg)
+	f, err := NewFetcher(NewClient(), cfg)
 	if err != nil {
 		t.Fatalf("NewFetcher: %v", err)
 	}

@@ -43,8 +43,8 @@ type Link struct {
 // document was actually served from (after redirects), since relative links and
 // image sources resolve against it.
 //
-// Internal-vs-external classification lives here because both the crawl
-// frontier and the broken-link check need it, and both read PageData.
+// Link.Internal is best-effort for check-writing convenience. The crawl
+// frontier re-derives internal links via crawler.ResolveURL + SameDomain.
 func Parse(baseURL string, body []byte) (PageData, error) {
 	base, err := url.Parse(baseURL)
 	if err != nil {
