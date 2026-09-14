@@ -1,7 +1,9 @@
 package checks
 
 import (
+	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -9,6 +11,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	json "encoding/json/v2"
 
 	"github.com/Erose112/seo-audit/internal/crawler"
 	"github.com/Erose112/seo-audit/internal/parser"
@@ -409,5 +413,43 @@ func TestSiteWideIntegration(t *testing.T) {
 	}
 	if !strings.Contains(parseFail.Message, "application/json") {
 		t.Errorf("/badjson Message = %q, want content-type detail", parseFail.Message)
+	}
+}
+
+func TestBrokenLinkKindJSONRoundTrip(t *testing.T) {
+	link := BrokenLink{
+		SourceURL:  "https://example.com/",
+		TargetURL:  "https://example.com/missing",
+		Kind:       crawler.ErrKindHTTPStatus,
+		StatusCode: 404,
+		Message:    "not found",
+	}
+
+	var buf bytes.Buffer
+	if err := json.MarshalWrite(&buf, link); err != nil {
+		t.Fatalf("MarshalWrite: %v", err)
+	}
+	if !strings.Contains(buf.String(), `"kind":"http_status"`) && !strings.Contains(buf.String(), `"kind": "http_status"`) {
+		t.Fatalf("JSON missing string kind: %s", buf.Bytes())
+	}
+
+	var decoded BrokenLink
+	if err := json.UnmarshalRead(bytes.NewReader(buf.Bytes()), &decoded); err != nil {
+		t.Fatalf("UnmarshalRead: %v", err)
+	}
+	if decoded != link {
+		t.Errorf("decoded = %#v, want %#v", decoded, link)
+	}
+}
+
+func TestBrokenLinkKindJSONUnknown(t *testing.T) {
+	const raw = `{"source_url":"https://example.com/","target_url":"https://example.com/x","kind":"bogus"}`
+	var link BrokenLink
+	err := json.UnmarshalRead(bytes.NewReader([]byte(raw)), &link)
+	if err == nil {
+		t.Fatal("expected error for unknown kind")
+	}
+	if !errors.Is(err, crawler.ErrUnknownErrorKind) {
+		t.Fatalf("error = %v, want ErrUnknownErrorKind", err)
 	}
 }

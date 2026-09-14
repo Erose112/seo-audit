@@ -1,0 +1,141 @@
+{
+  "schema_version": 1,
+  "url": "https://example.com/",
+  "timestamp": "2026-03-13T12:00:00Z",
+  "score": 75,
+  "pages_crawled": 2,
+  "checks": [
+    {
+      "check_id": "CANONICAL",
+      "name": "Canonical link present",
+      "severity": "pass",
+      "pages_failed": 0,
+      "pages_total": 2
+    },
+    {
+      "check_id": "IMAGE_ALT",
+      "name": "Images have alt attributes",
+      "severity": "warning",
+      "pages_failed": 1,
+      "pages_total": 2
+    },
+    {
+      "check_id": "META_DESCRIPTION",
+      "name": "Meta description present and well-sized",
+      "severity": "pass",
+      "pages_failed": 0,
+      "pages_total": 2
+    },
+    {
+      "check_id": "SINGLE_H1",
+      "name": "Exactly one H1",
+      "severity": "error",
+      "pages_failed": 1,
+      "pages_total": 2
+    },
+    {
+      "check_id": "TITLE_EXISTS",
+      "name": "Title tag exists",
+      "severity": "pass",
+      "pages_failed": 0,
+      "pages_total": 2
+    },
+    {
+      "check_id": "TITLE_LENGTH",
+      "name": "Title length within range",
+      "severity": "pass",
+      "pages_failed": 0,
+      "pages_total": 2
+    },
+    {
+      "check_id": "VIEWPORT",
+      "name": "Responsive viewport meta tag",
+      "severity": "pass",
+      "pages_failed": 0,
+      "pages_total": 2
+    }
+  ],
+  "pages": [
+    {
+      "url": "https://example.com/about",
+      "score": 90,
+      "results": [
+        {
+          "check_id": "TITLE_EXISTS",
+          "severity": "pass",
+          "message": "Title present",
+          "deduction": 0
+        },
+        {
+          "check_id": "SINGLE_H1",
+          "severity": "pass",
+          "message": "One H1",
+          "deduction": 0
+        },
+        {
+          "check_id": "IMAGE_ALT",
+          "severity": "pass",
+          "message": "All images have alt",
+          "deduction": 0
+        }
+      ]
+    },
+    {
+      "url": "https://example.com/home",
+      "score": 60,
+      "results": [
+        {
+          "check_id": "TITLE_EXISTS",
+          "severity": "pass",
+          "message": "Title present",
+          "deduction": 0
+        },
+        {
+          "check_id": "SINGLE_H1",
+          "severity": "error",
+          "message": "Multiple H1 tags",
+          "deduction": 10
+        },
+        {
+          "check_id": "IMAGE_ALT",
+          "severity": "warning",
+          "message": "Missing alt on 1 image",
+          "deduction": 5
+        }
+      ]
+    }
+  ],
+  "site_issues": {
+    "duplicate_titles": {
+      "Alpha Title": [
+        "https://example.com/a",
+        "https://example.com/b"
+      ],
+      "Beta Title": [
+        "https://example.com/c",
+        "https://example.com/d"
+      ]
+    },
+    "broken_links": [
+      {
+        "source_url": "https://example.com/",
+        "target_url": "https://example.com/missing",
+        "kind": "http_status",
+        "status_code": 404,
+        "message": "404 Not Found"
+      },
+      {
+        "source_url": "https://example.com/about",
+        "target_url": "https://example.com/gone",
+        "kind": "parse_failure"
+      }
+    ]
+  },
+  "summary": {
+    "pages_crawled": 2,
+    "pages_with_errors": 1,
+    "broken_links": 2,
+    "duplicate_titles": 2,
+    "average_score": 75
+  }
+}

@@ -15,10 +15,10 @@ const (
 )
 
 type CheckResult struct {
-	CheckID   string
-	Severity  Severity
-	Message   string
-	Deduction int
+	CheckID   string   `json:"check_id"`
+	Severity  Severity `json:"severity"`
+	Message   string   `json:"message"`
+	Deduction int      `json:"deduction"`
 }
 
 type Check interface {

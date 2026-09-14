@@ -837,59 +837,74 @@ broken link; robots-disallowed targets are not flagged.
 an API contract, version it if you expect to change it later) and produce
 matching human-readable terminal output.
 
+**Contract of record:** [docs/report-schema.md](report-schema.md) (version 1).
+
 **Knowledge needed:**
 
-- `encoding/json` struct tags, `json.MarshalIndent` for readable output
+- `encoding/json/v2` + `encoding/json/jsontext` — `json.MarshalWrite` with
+  `jsontext.WithIndent("  ")` and `json.Deterministic(true)` (required for
+  stable `duplicate_titles` map key order in golden tests)
+- v2 `omitzero` vs `omitempty`: use `omitzero` on scalars where the intent is
+  "omit on Go zero value" (`BrokenLink.status_code`, `BrokenLink.message`);
+  `omitempty` on ints does *not* omit zero under v2
+- JSON tags on domain structs in `internal/checks` and `internal/report`;
+  `crawler.FetchErrorKind` uses `MarshalText`/`UnmarshalText` (not
+  `MarshalJSON`) beside its existing `String()`
 - Keep stdout for the report and route diagnostic/progress logs to stderr
-(or a `--verbose` gated logger) — this is explicitly required so CI can
-parse JSON stdout cleanly
 - `fatih/color` for terminal formatting (auto-disables color when stdout
-isn't a TTY — verify this behavior, don't assume)
+  isn't a TTY — verified in `text_test.go`)
+
+**Architecture decisions:**
+
+- **`runCrawl` in `cmd/crawl.go`** owns the pipeline: `crawler.Crawl` → per-page
+  `checks.AllChecks()` + `scoring.ScorePage` → `FindDuplicateTitles` /
+  `FindBrokenLinks` → `report.BuildReport`. Report package is a pure formatter.
+- **`schema_version: 1`** is the first field in the JSON payload
+  (`report.SchemaVersion`).
 
 **Work:**
 
 `internal/report/report.go`:
 
 ```go
-package report
+const SchemaVersion = 1
 
 type Report struct {
-	URL          string          `json:"url"`
-	Timestamp    time.Time       `json:"timestamp"`
-	Score        int             `json:"score"`
-	PagesCrawled int             `json:"pages_crawled"`
-	Checks       []CheckSummary  `json:"checks"`
-	Pages        []PageReport    `json:"pages"`
-	Summary      Summary         `json:"summary"`
-	// TODO(stage-8): add SiteIssues checks.SiteResult `json:"site_issues"` so
-	// per-URL duplicate-title and broken-link detail is not lost behind counts.
+	SchemaVersion int               `json:"schema_version"`
+	URL           string            `json:"url"`
+	Timestamp     time.Time         `json:"timestamp"`
+	Score         int               `json:"score"`
+	PagesCrawled  int               `json:"pages_crawled"`
+	Checks        []CheckSummary    `json:"checks"`
+	Pages         []PageReport      `json:"pages"`
+	SiteIssues    checks.SiteResult `json:"site_issues"`
+	Summary       Summary           `json:"summary"`
 }
 
-type PageReport struct {
-	URL     string               `json:"url"`
-	Score   int                  `json:"score"`
-	Results []checks.CheckResult `json:"results"`
+type BuildInput struct {
+	URL, Timestamp, Crawl, Site, Pages, CheckNames ...
 }
 
-func BuildReport(url string, crawlResult crawler.CrawlResult, siteResult checks.SiteResult) Report { ... }
+func BuildReport(in BuildInput) Report { ... }
 
 func (r Report) WriteJSON(w io.Writer) error {
-	enc := json.NewEncoder(w)
-	enc.SetIndent("", "  ")
-	return enc.Encode(r)
-}
-
-func (r Report) WriteText(w io.Writer) error {
-	// fatih/color formatted: ✓ / ✗ / ⚠ per check, score line, FAILED CHECKS section
+	return json.MarshalWrite(w, r,
+		jsontext.WithIndent("  "),
+		json.Deterministic(true),
+	)
+	// then append a trailing newline
 }
 ```
 
-**Testing:** golden-file test — marshal a fixed `Report` struct, compare
-against a checked-in `testdata/expected_report.json`; catches accidental
-schema drift, which matters a lot once the CI runner is parsing this.
+`cmd/crawl.go`: `runCrawl(ctx, cfg) (report.Report, error)` wraps Stages 6–8.
 
-**Exit criteria:** `seo-audit crawl --url ... --output json` produces schema-
-valid JSON on stdout with zero non-JSON bytes mixed in; `--output text`
+**Testing:** golden-file test against `testdata/expected_report.json` with
+`-update`; unmarshal round-trip; empty-crawl nil→`[]`/`{}` verification;
+`FetchErrorKind` text round-trip; broken-link JSON round-trip in
+`checks/sitewide_test.go`.
+
+**Exit criteria:** ✅ `seo-audit crawl --url ... --output json` produces schema-
+valid JSON on stdout with zero non-JSON bytes mixed in; ✅ `--output text`
 produces the formatted terminal report from the project doc's mockup.
 
 ---
@@ -993,6 +1008,10 @@ func Compare(baseline, current report.Report, maxScoreDrop int) RegressionResult
 func LoadBaseline(path string) (report.Report, error) { ... } // returns zero value, nil if path == "" or file missing (first run)
 func SaveBaseline(path string, r report.Report) error { ... }
 ```
+
+Use `json.UnmarshalRead` from `encoding/json/v2` for consistency with Stage 8.
+v2 field matching is case-sensitive by default (stricter than v1's fallback).
+Decode errors wrap as `*json.SemanticError`, not v1's `*json.UnmarshalTypeError`.
 
 Wire into `cmd/crawl.go`: load baseline before crawling, compare after, print
 the "SEO REGRESSION DETECTED" block from the doc's mockup on regression, then
