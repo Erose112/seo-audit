@@ -7,11 +7,11 @@ import (
 )
 
 type Summary struct {
-	PagesCrawled    int
-	PagesWithErrors int
-	BrokenLinks     int
-	DuplicateTitles int
-	AverageScore    int
+	PagesCrawled    int `json:"pages_crawled"`
+	PagesWithErrors int `json:"pages_with_errors"`
+	BrokenLinks     int `json:"broken_links"`
+	DuplicateTitles int `json:"duplicate_titles"`
+	AverageScore    int `json:"average_score"`
 }
 
 // BuildSummary aggregates crawl, site-wide, and scoring inputs into counts.

@@ -10,16 +10,16 @@ import (
 )
 
 type SiteResult struct {
-	DuplicateTitles map[string][]string // title -> URLs sharing it (2+ only)
-	BrokenLinks     []BrokenLink
+	DuplicateTitles map[string][]string `json:"duplicate_titles"` // title -> URLs sharing it (2+ only)
+	BrokenLinks     []BrokenLink        `json:"broken_links"`
 }
 
 type BrokenLink struct {
-	SourceURL  string
-	TargetURL  string
-	Kind       crawler.FetchErrorKind
-	StatusCode int
-	Message    string
+	SourceURL  string                 `json:"source_url"`
+	TargetURL  string                 `json:"target_url"`
+	Kind       crawler.FetchErrorKind `json:"kind"`
+	StatusCode int                    `json:"status_code,omitzero"`
+	Message    string                 `json:"message,omitzero"`
 }
 
 // FindDuplicateTitles groups crawled pages by trimmed title and returns only

@@ -32,6 +32,10 @@ const (
 // after at least five have been tried.
 var ErrSystemicFailureRate = errors.New("failure rate exceeds 50%")
 
+// ErrUnknownErrorKind is returned when a FetchErrorKind cannot be decoded from
+// its wire representation.
+var ErrUnknownErrorKind = errors.New("unknown fetch error kind")
+
 func (k FetchErrorKind) String() string {
 	switch k {
 	case ErrKindTimeout:
@@ -50,6 +54,32 @@ func (k FetchErrorKind) String() string {
 		return "parse_failure"
 	}
 	return "unknown"
+}
+
+func (k FetchErrorKind) MarshalText() ([]byte, error) {
+	return []byte(k.String()), nil
+}
+
+func (k *FetchErrorKind) UnmarshalText(text []byte) error {
+	switch string(text) {
+	case "timeout":
+		*k = ErrKindTimeout
+	case "connection":
+		*k = ErrKindConnection
+	case "tls":
+		*k = ErrKindTLS
+	case "http_status":
+		*k = ErrKindHTTPStatus
+	case "permanent":
+		*k = ErrKindPermanent
+	case "canceled":
+		*k = ErrKindCanceled
+	case "parse_failure":
+		*k = ErrKindParseFailure
+	default:
+		return fmt.Errorf("%w: %q", ErrUnknownErrorKind, text)
+	}
+	return nil
 }
 
 // CrawlError records a page-level failure for reporting.

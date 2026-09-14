@@ -103,6 +103,41 @@ func TestFetchErrorKindString(t *testing.T) {
 	}
 }
 
+func TestFetchErrorKindTextRoundTrip(t *testing.T) {
+	kinds := []FetchErrorKind{
+		ErrKindTimeout,
+		ErrKindConnection,
+		ErrKindTLS,
+		ErrKindHTTPStatus,
+		ErrKindPermanent,
+		ErrKindCanceled,
+		ErrKindParseFailure,
+	}
+	for _, kind := range kinds {
+		t.Run(kind.String(), func(t *testing.T) {
+			text, err := kind.MarshalText()
+			if err != nil {
+				t.Fatalf("MarshalText: %v", err)
+			}
+			var got FetchErrorKind
+			if err := got.UnmarshalText(text); err != nil {
+				t.Fatalf("UnmarshalText: %v", err)
+			}
+			if got != kind {
+				t.Errorf("round-trip = %v, want %v", got, kind)
+			}
+		})
+	}
+}
+
+func TestFetchErrorKindUnmarshalTextUnknown(t *testing.T) {
+	var kind FetchErrorKind
+	err := kind.UnmarshalText([]byte("not_a_kind"))
+	if !errors.Is(err, ErrUnknownErrorKind) {
+		t.Fatalf("UnmarshalText() error = %v, want ErrUnknownErrorKind", err)
+	}
+}
+
 func TestIsRetryable(t *testing.T) {
 	cases := []struct {
 		name string
