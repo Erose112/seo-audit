@@ -10,6 +10,8 @@ type CrawlConfig struct {
 	MaxDuration time.Duration
 	MaxBodySize int64
 	Output      string // "text" | "json"
+	FailBelow   int
+	Baseline    string // path to previous report, empty = none
 }
 
 type CompareConfig struct {

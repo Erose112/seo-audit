@@ -635,7 +635,7 @@ exit 0/1. It should not re-implement failure-rate math.
 | `FetchRobots(ctx, …)` | **Done** (Stage 6; fail-open, always non-nil policy) |
 | `CrawlError` ← `FetchErrorKind` (+ `ErrKindParseFailure`) | **Done** (Stage 6) |
 | `Crawl(ctx, …) (CrawlResult, error)` + root / Rule 3 | **Done** (Stage 6) |
-| `FailBelow` / `Baseline` / `MaxScoreDrop` on `CrawlConfig` | Deferred to Stage 9 |
+| `FailBelow` / `Baseline` on `CrawlConfig` | **Done** (Stage 9; `MaxScoreDrop` deferred to Stage 10) |
 
 **Also supersedes** the Stage 6 “v1: log and skip, don’t retry” note below:
 retries follow architecture §5 (already implemented on the fetcher).
@@ -767,6 +767,8 @@ manual run against a real small site completes and respects `--delay`.
 
 ## Stage 7 — Site-Wide Analysis
 
+**Status: Done.**
+
 **Goal:** Cross-page checks that need the full `CrawlResult`, not a single
 `PageData`: duplicate titles, broken internal links, and the aggregation
 summary.
@@ -832,6 +834,8 @@ broken link; robots-disallowed targets are not flagged.
 
 
 ## Stage 8 — Reporting (JSON + Text)
+
+**Status: Done.**
 
 **Goal:** Lock the JSON schema (the CI runner depends on this — treat it as
 an API contract, version it if you expect to change it later) and produce
@@ -913,6 +917,8 @@ produces the formatted terminal report from the project doc's mockup.
 
 ## Stage 9 — Exit Codes / CI Gate Behavior
 
+**Status: Done.**
+
 **Goal:** Wire the score into process exit codes per the documented contract.
 
 **Note:** Systemic crawl failures (root URL down, incremental Rule 3 failure
@@ -936,28 +942,39 @@ generic error handling from Stage 0.
 
 ```go
 RunE: func(cmd *cobra.Command, args []string) error {
-	result, err := runCrawl(crawlCfg) // wraps Stages 6-8
+	ctx, cancel := crawler.NewCrawlContext(crawlCfg.MaxDuration)
+	defer cancel()
+
+	rep, err := runCrawl(ctx, crawlCfg) // wraps Stages 6-8 (already landed)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "crawl error:", err)
 		os.Exit(2)
 	}
 
-	// write report per --output
+	// write report per --output (already landed in Stage 8)
 	...
 
 	if crawlCfg.Baseline != "" {
 		// Stage 10 regression check happens here
 	}
 
-	if result.Report.Score < crawlCfg.FailBelow {
+	if rep.Score < crawlCfg.FailBelow {
 		os.Exit(1)
 	}
 	return nil
 },
 ```
 
-**Exit criteria:** manual tests confirm `0`/`1`/`2` in each scenario —
-passing score, failing score, and (e.g.) an unreachable `--url`.
+**Exit criteria:** ✅ manual tests confirm `0`/`1`/`2` in each scenario —
+passing score, failing score, and (e.g.) an unreachable `--url`. ✅
+`exitCodeFor` covered by unit tests in `cmd/exitcode_test.go`. ✅
+`--baseline` prints an explicit stderr warning until Stage 10 (no silent
+ignore).
+
+**Landed notes:** `RunE` prints `crawl error:` to stderr and `os.Exit(2)` on
+crawl failure (no report emitted). Successful crawls always write the report
+before the score gate. `exitCodeFor(rep, cfg, runErr)` holds the branching
+logic; `RunE` calls `os.Exit` only at the outer edge.
 
 ---
 
@@ -1142,8 +1159,8 @@ No LLM-suggestion layer is planned at all for this tool.
 | 5. Scoring            | Done   | 4          | yes, fully unit-testable                   |
 | 6. Crawl engine       | Done   | 2, 3       | yes, via httptest fixture server           |
 | 7. Site-wide analysis | Done   | 6          | yes, via httptest fixture server           |
-| 8. Reporting          | TODO   | 5, 7       | yes, golden-file test                      |
-| 9. Exit codes         | TODO   | 8          | manual/integration                         |
+| 8. Reporting          | Done   | 5, 7       | yes, golden-file test                      |
+| 9. Exit codes         | Done   | 8          | yes (`exitCodeFor` unit tests + manual)    |
 | 10. Regression        | TODO   | 8          | yes, fully unit-testable                   |
 | 11. CI integration    | TODO   | 9, 10      | integration only, needs runner-side prereq |
 | 12. Validation & docs | TODO   | 11         | manual                                     |
@@ -1151,5 +1168,5 @@ No LLM-suggestion layer is planned at all for this tool.
 
 
 Stages 2–5 and 10 are the ones you can build and fully unit-test with zero
-network access. Stage 7 is complete; next is Stage 8 (reporting over
-`CrawlResult` + `SiteResult`).
+network access. Stage 9 is complete (exit codes / `--fail-below` gate over the
+landed report); next is Stage 10 (regression engine + baseline I/O).
