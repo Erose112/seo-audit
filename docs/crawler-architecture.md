@@ -674,8 +674,9 @@ bytes instead.
 **Handling truncation:** if the read hits the cap (the `cap+1`-byte read
 above actually consumed that extra byte), the page sets
 `PageResponse.Truncated` (landed). The crawl records
-`ErrKindParseFailure` rather than feeding truncated HTML into the parser;
-Stage 7 may later surface this as a dedicated check finding.
+`ErrKindParseFailure` rather than feeding truncated HTML into the parser.
+Stage 7's `FindBrokenLinks` flags pages that link to such targets (and other
+`CrawlError`s); it is not a separate per-page `Check`.
 
 ---
 
@@ -683,34 +684,41 @@ Stage 7 may later surface this as a dedicated check finding.
 
 ## 12. End-to-End Flow Summary
 
-**Status:** Stage 6 landed this flow in `cmd/crawl.go` + `crawler.Crawl`.
-Full scoring / JSON report / exit-code mapping remains Stages 7–9.
+**Status:** Stages 6–8 landed. `cmd/crawl.go` runs `runCrawl` (Crawl →
+per-page checks/scoring → site-wide analysis → `report.BuildReport`) and
+writes JSON or text. Exit-code mapping remains Stage 9.
 
 ```
-cmd/crawl: NewCrawlContext(maxDuration) → NewFetcher(NewClient(), cfg) → Crawl
+cmd/crawl: NewCrawlContext(maxDuration) → runCrawl(ctx, cfg)
   │
-  ├─ fetch root URL (special case: failure here → systemic err immediately)
-  ├─ fetch + parse robots.txt (10s timeout, fail-open; root ignores robots)
+  ├─ NewFetcher(NewClient(), cfg) → Crawl
+  │    ├─ fetch root URL (special case: failure here → systemic err immediately)
+  │    ├─ fetch + parse robots.txt (10s timeout, fail-open; root ignores robots)
+  │    │
+  │    └─ sequential BFS loop (one in-flight fetch; MaxConnsPerHost = 1)
+  │         └─ per queued URL, until frontier empty or --max-pages reached:
+  │              1. rateLimiter.Wait(ctx)              — ctx-aware, exits clean on cancel
+  │              2. Fetcher.FetchWithRetry(ctx, url, retry):
+  │                   attempt 1: fetchOnce(ctx, url, 15s)
+  │                     ├─ success → done
+  │                     └─ fail → isRetryable?
+  │                          ├─ no  (404/403/canceled/TLS/permanent) → return immediately
+  │                          └─ yes → backoff, escalate timeout ×1.5, retry
+  │                                (max 2 retries, ≤90s total per page, enforced)
+  │              3. classify result:
+  │                   ├─ ErrKindCanceled → propagate → exit 2, no report (hard-exit)
+  │                   ├─ other fetch error → append CrawlError; continue
+  │                   ├─ parse/non-HTML/truncated → ErrKindParseFailure (not fail-rate)
+  │                   └─ success → append CrawledPage; enqueue undiscovered internal links
+  │                        (ResolveURL + SameDomain; robots on path+query; seen = Normalize)
+  │              4. checkSystemicFailureRate once attempts ≥ 5 (§7)
   │
-  └─ sequential BFS loop (one in-flight fetch; MaxConnsPerHost = 1)
-       └─ per queued URL, until frontier empty or --max-pages reached:
-            1. rateLimiter.Wait(ctx)              — ctx-aware, exits clean on cancel
-            2. Fetcher.FetchWithRetry(ctx, url, retry):
-                 attempt 1: fetchOnce(ctx, url, 15s)
-                   ├─ success → done
-                   └─ fail → isRetryable?
-                        ├─ no  (404/403/canceled/TLS/permanent) → return immediately
-                        └─ yes → backoff, escalate timeout ×1.5, retry
-                              (max 2 retries, ≤90s total per page, enforced)
-            3. classify result:
-                 ├─ ErrKindCanceled → propagate → exit 2, no report (hard-exit)
-                 ├─ other fetch error → append CrawlError; continue
-                 ├─ parse/non-HTML/truncated → ErrKindParseFailure (not fail-rate)
-                 └─ success → append CrawledPage; enqueue undiscovered internal links
-                      (ResolveURL + SameDomain; robots on path+query; seen = Normalize)
-            4. checkSystemicFailureRate once attempts ≥ 5 (§7)
+  ├─ per CrawledPage: AllChecks() → ScorePage → PageReport
+  ├─ FindDuplicateTitles + FindBrokenLinks → SiteResult
+  ├─ report.BuildReport → WriteJSON / WriteText (schema_version: 1)
   │
-  └─ (Stage 9) map Crawl err → exit 2; else score/regression → exit 0 or 1
+  └─ map Crawl err → exit 2; else write report; --fail-below → exit 0 or 1
+     (--baseline regression → Stage 10)
 ```
 
 ---

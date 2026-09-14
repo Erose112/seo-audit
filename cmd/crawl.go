@@ -3,7 +3,7 @@ package cmd
 import (
 	"context"
 	"fmt"
-	"io"
+	"os"
 	"time"
 
 	"github.com/Erose112/seo-audit/internal/checks"
@@ -30,9 +30,10 @@ var crawlCmd = &cobra.Command{
 		ctx, cancel := crawler.NewCrawlContext(crawlCfg.MaxDuration)
 		defer cancel()
 
-		rep, err := runCrawl(ctx, crawlCfg)
-		if err != nil {
-			return err
+		rep, runErr := runCrawl(ctx, crawlCfg)
+		if runErr != nil {
+			fmt.Fprintln(cmd.ErrOrStderr(), "crawl error:", runErr)
+			os.Exit(2)
 		}
 
 		switch crawlCfg.Output {
@@ -45,8 +46,29 @@ var crawlCmd = &cobra.Command{
 				return err
 			}
 		}
+
+		if crawlCfg.Baseline != "" {
+			fmt.Fprintln(cmd.ErrOrStderr(), "warning: --baseline regression comparison not yet implemented (Stage 10); flag ignored")
+			// TODO(stage-10): regression comparison + SaveBaseline
+		}
+
+		if code := exitCodeFor(rep, crawlCfg, nil); code != 0 {
+			os.Exit(code)
+		}
 		return nil
 	},
+}
+
+// exitCodeFor maps crawl outcome to the stable CI exit-code contract:
+// 0 = pass, 1 = score gate failure, 2 = systemic/CLI error.
+func exitCodeFor(rep report.Report, cfg config.CrawlConfig, runErr error) int {
+	if runErr != nil {
+		return 2
+	}
+	if rep.Score < cfg.FailBelow {
+		return 1
+	}
+	return 0
 }
 
 func runCrawl(ctx context.Context, cfg config.CrawlConfig) (report.Report, error) {
@@ -76,7 +98,6 @@ func runCrawl(ctx context.Context, cfg config.CrawlConfig) (report.Report, error
 
 	weights := scoring.DefaultWeights()
 	pages := make([]report.PageReport, 0, len(result.Pages))
-	pageScores := make([]int, 0, len(result.Pages))
 
 	for _, p := range result.Pages {
 		results := make([]checks.CheckResult, 0, len(checks.AllChecks()))
@@ -89,7 +110,6 @@ func runCrawl(ctx context.Context, cfg config.CrawlConfig) (report.Report, error
 			Score:   score,
 			Results: results,
 		})
-		pageScores = append(pageScores, score)
 	}
 
 	site := checks.SiteResult{
@@ -107,20 +127,6 @@ func runCrawl(ctx context.Context, cfg config.CrawlConfig) (report.Report, error
 	}), nil
 }
 
-func writeCrawlDiagnostics(w io.Writer, result crawler.CrawlResult) {
-	fmt.Fprintf(w, "Pages crawled: %d\n", len(result.Pages))
-	fmt.Fprintf(w, "Page errors:   %d\n", len(result.Errors))
-	for _, p := range result.Pages {
-		fmt.Fprintf(w, "  [%d] %s — %q\n", p.Depth, p.URL, p.Data.Title)
-	}
-	for _, e := range result.Errors {
-		if e.StatusCode > 0 {
-			fmt.Fprintf(w, "  error: %s — %s (%d): %s\n", e.URL, e.Kind, e.StatusCode, e.Message)
-		} else {
-			fmt.Fprintf(w, "  error: %s — %s: %s\n", e.URL, e.Kind, e.Message)
-		}
-	}
-}
 
 func init() {
 	crawlCmd.Flags().StringVar(&crawlCfg.URL, "url", "", "target URL (required)")
@@ -130,6 +136,8 @@ func init() {
 	crawlCmd.Flags().DurationVar(&crawlCfg.MaxDuration, "max-duration", 5*time.Minute, "max wall-clock time for the crawl")
 	crawlCmd.Flags().Int64Var(&crawlCfg.MaxBodySize, "max-body-size", crawler.DefaultMaxBodySize, "max response body bytes to read per page")
 	crawlCmd.Flags().StringVar(&crawlCfg.Output, "output", "text", "text|json")
+	crawlCmd.Flags().IntVar(&crawlCfg.FailBelow, "fail-below", 0, "exit 1 if score below this")
+	crawlCmd.Flags().StringVar(&crawlCfg.Baseline, "baseline", "", "path to baseline JSON report")
 	crawlCmd.MarkFlagRequired("url")
 	rootCmd.AddCommand(crawlCmd)
 }
