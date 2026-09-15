@@ -10,6 +10,8 @@ Report → Regression → CI).
 
 ## Stage 0 — Environment & Repo Scaffolding
 
+**Status: Done.**
+
 **Goal:** A buildable empty Go module with the target directory layout and
 dependency set pinned.
 
@@ -96,6 +98,8 @@ with no subcommands yet.
 
 ## Stage 1 — CLI Foundation (flags, no logic)
 
+**Status: Done.**
+
 **Goal:** `crawl` and `compare` subcommands exist and parse all flags into a
 typed config struct, but do nothing real yet (stub output only). This locks
 the CLI contract early so every later stage just fills in behavior.
@@ -165,6 +169,8 @@ not a panic.
 
 
 ## Stage 2 — Single-Page Fetch + Parse
+
+**Status: Done.**
 
 **Goal:** Given one URL, fetch it and extract a `PageData` struct. No
 crawling/frontier yet — this stage proves the fetch→parse pipeline in
@@ -286,6 +292,8 @@ into `crawl.go`) prints a populated `PageData`.
 
 ## Stage 3 — URL Normalization & Dedup
 
+**Status: Done.**
+
 **Goal:** A standalone, heavily-tested URL utility package. This is
 deceptively fiddly and worth isolating before the crawler depends on it,
 since bugs here silently cause double-crawls or missed pages.
@@ -323,6 +331,8 @@ sites (test against a couple of live HTML samples with relative links).
 
 
 ## Stage 4 — Check Framework + First Checks
+
+**Status: Done.**
 
 **Goal:** The `Check` interface and enough checks to validate the framework
 shape, run against `PageData` fixtures from Stage 2 — no crawler needed yet.
@@ -415,6 +425,8 @@ against all fixtures; e.g. `multiple_h1.html` → `SingleH1Check` returns
 
 
 ## Stage 5 — Scoring Engine
+
+**Status: Done.**
 
 **Goal:** Deterministic page score and site score from a set of
 `CheckResult`s, with configurable weighting.
@@ -1065,8 +1077,13 @@ missing semantics, atomic save, stderr regression output on `crawl`, and
 
 ## Stage 11 — CI Runner Integration
 
-**Goal:** Package the binary and wire it into the existing Go CI runner using
-the file-based baseline scheme (no runner schema changes for v1).
+**Status: Done (seo-audit side).** Runner-side items remain blocked — see below.
+
+**Goal:** Package the binary and document the CI-runner contract so the tool is
+runner-ready and provably correct under a simulated runner, using the file-based
+baseline scheme (no runner schema changes for v1).
+
+**Contract of record:** [docs/ci-integration.md](ci-integration.md).
 
 **Knowledge needed:**
 
@@ -1083,22 +1100,35 @@ its existing log-pipeline conventions rather than inventing a new one
 
 **Work:**
 
-1. Confirm/implement the runner's persistent job-dir feature (separate
-  project, but a hard dependency for this stage).
-2. `seo-audit crawl` reads `<job-dir>/latest.json` as `--baseline`
-  automatically when the runner sets an env var or flag pointing at the job
-   dir (decide: explicit `--baseline` flag passed by the job config, as
-   shown in the doc's YAML, is simplest — keep the tool itself unaware of
-   "job dirs" as a concept, per the stated goal of zero coupling).
-3. Add a `Makefile`/`goreleaser` config to produce a versioned release binary
-  the runner fetches instead of building from source per run.
-4. Add the job definition (from the doc) to the QRET/Degree Planner CI
-  config.
+| Item | Status |
+| --- | --- |
+| `internal/buildinfo` + `--version` flag | **Done** |
+| `Makefile` (build, test, test-integration, dist, ci-sim) | **Done** |
+| `.github/workflows/ci.yml` (vet, build, unit + integration tests) | **Done** |
+| `docs/ci-integration.md` (job fields, exit codes, job-dir contract) | **Done** |
+| `cmd/ci_integration_test.go` (subprocess exit-code contract) | **Done** |
+| Runner persistent job-dir feature | **Blocked** — separate repo, not built |
+| Job definition in QRET/Degree Planner CI config | **Blocked** — requires runner |
+| goreleaser + GitHub Release workflow | **Deferred** — Phase 2, not started |
 
-**Exit criteria:** a real CI run executes `seo-audit crawl`, exit code
-propagates correctly to the runner's pass/fail logic, and `latest.json`
-persists between two consecutive runs (verify the second run's regression
-comparison actually fires against the first run's report).
+**Decisions (landed):**
+
+- Explicit `--baseline <job-dir>/latest.json` in job config — no env-var or
+  job-dir coupling inside the tool.
+- Phase 1 only: Makefile multi-arch release via `make dist` (archives in
+  `dist/seo-audit_<version>_<os>_<arch>.tar.gz`).
+- Archive naming matches the future goreleaser template so Phase 2 is a
+  drop-in swap when ready.
+- `SaveBaseline` failure remains warn-only (exit code unchanged); runner must
+  monitor stderr — see ci-integration.md.
+
+**Exit criteria (rescoped):**
+
+- ✅ `go test -tags integration ./cmd/` proves exit codes 0/1/2 via subprocess
+- ✅ `make ci-sim` (or equivalent) available for two-run baseline validation
+  against a live site
+- ⏳ Real CI run through the Go runner — blocked until runner exists
+- ⏳ GitHub Release automation — deferred to Phase 2 (goreleaser)
 
 ---
 
@@ -1181,11 +1211,12 @@ No LLM-suggestion layer is planned at all for this tool.
 | 8. Reporting          | Done   | 5, 7       | yes, golden-file test                      |
 | 9. Exit codes         | Done   | 8          | yes (`exitCodeFor` unit tests + manual)    |
 | 10. Regression        | Done   | 8          | yes, fully unit-testable                   |
-| 11. CI integration    | TODO   | 9, 10      | integration only, needs runner-side prereq |
+| 11. CI integration    | Done (tool) / blocked (runner) | 9, 10      | integration tag + ci-sim                     |
 | 12. Validation & docs | TODO   | 11         | manual                                     |
 | 13. v2 backlog        | —      | —          | n/a                                        |
 
 
 Stages 2–5 and 10 are the ones you can build and fully unit-test with zero
-network access. Stage 10 is complete (regression engine + baseline I/O); next
-is Stage 11 (CI runner integration).
+network access. Stage 10 is complete (regression engine + baseline I/O); Stage
+11 is complete on the seo-audit side (packaging, contract doc, integration
+tests). Next is Stage 12 (production validation on real sites).
