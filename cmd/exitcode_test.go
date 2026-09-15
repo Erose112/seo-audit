@@ -14,11 +14,12 @@ func TestExitCodeFor(t *testing.T) {
 	runErr := errors.New("root URL unreachable")
 
 	tests := []struct {
-		name   string
-		rep    report.Report
-		cfg    config.CrawlConfig
-		runErr error
-		want   int
+		name      string
+		rep       report.Report
+		cfg       config.CrawlConfig
+		runErr    error
+		regressed bool
+		want      int
 	}{
 		{
 			name:   "crawl error",
@@ -49,12 +50,33 @@ func TestExitCodeFor(t *testing.T) {
 			cfg:    config.CrawlConfig{FailBelow: 0},
 			want:   0,
 		},
+		{
+			name:      "regression without score gate",
+			rep:       report.Report{Score: 95},
+			cfg:       config.CrawlConfig{FailBelow: 80},
+			regressed: true,
+			want:      1,
+		},
+		{
+			name:      "regression and score gate both fail",
+			rep:       report.Report{Score: 70},
+			cfg:       config.CrawlConfig{FailBelow: 80},
+			regressed: true,
+			want:      1,
+		},
+		{
+			name:      "regression false score pass",
+			rep:       report.Report{Score: 95},
+			cfg:       config.CrawlConfig{FailBelow: 80},
+			regressed: false,
+			want:      0,
+		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			if got := exitCodeFor(tt.rep, tt.cfg, tt.runErr); got != tt.want {
+			if got := exitCodeFor(tt.rep, tt.cfg, tt.runErr, tt.regressed); got != tt.want {
 				t.Errorf("exitCodeFor() = %d, want %d", got, tt.want)
 			}
 		})

@@ -9,6 +9,7 @@ import (
 	"github.com/Erose112/seo-audit/internal/checks"
 	"github.com/Erose112/seo-audit/internal/config"
 	"github.com/Erose112/seo-audit/internal/crawler"
+	"github.com/Erose112/seo-audit/internal/regression"
 	"github.com/Erose112/seo-audit/internal/report"
 	"github.com/Erose112/seo-audit/internal/scoring"
 	"github.com/spf13/cobra"
@@ -25,6 +26,19 @@ var crawlCmd = &cobra.Command{
 		case "json", "text":
 		default:
 			return fmt.Errorf("invalid --output %q: want text or json", crawlCfg.Output)
+		}
+
+		strictRules, err := regression.NormalizeRules(crawlCfg.StrictRules)
+		if err != nil {
+			return err
+		}
+
+		var baselineRep report.Report
+		if crawlCfg.Baseline != "" {
+			baselineRep, err = regression.LoadBaseline(crawlCfg.Baseline)
+			if err != nil {
+				return err
+			}
 		}
 
 		ctx, cancel := crawler.NewCrawlContext(crawlCfg.MaxDuration)
@@ -47,12 +61,24 @@ var crawlCmd = &cobra.Command{
 			}
 		}
 
+		var regressed bool
 		if crawlCfg.Baseline != "" {
-			fmt.Fprintln(cmd.ErrOrStderr(), "warning: --baseline regression comparison not yet implemented (Stage 10); flag ignored")
-			// TODO(stage-10): regression comparison + SaveBaseline
+			rr := regression.Compare(baselineRep, rep, regression.Options{
+				MaxScoreDrop: crawlCfg.MaxScoreDrop,
+				StrictRules:  strictRules,
+			})
+			regressed = rr.Regressed
+			if regressed {
+				if err := rr.WriteText(cmd.ErrOrStderr()); err != nil {
+					return err
+				}
+			}
+			if err := regression.SaveBaseline(crawlCfg.Baseline, rep); err != nil {
+				fmt.Fprintln(cmd.ErrOrStderr(), "warning: failed to save baseline:", err)
+			}
 		}
 
-		if code := exitCodeFor(rep, crawlCfg, nil); code != 0 {
+		if code := exitCodeFor(rep, crawlCfg, nil, regressed); code != 0 {
 			os.Exit(code)
 		}
 		return nil
@@ -60,12 +86,12 @@ var crawlCmd = &cobra.Command{
 }
 
 // exitCodeFor maps crawl outcome to the stable CI exit-code contract:
-// 0 = pass, 1 = score gate failure, 2 = systemic/CLI error.
-func exitCodeFor(rep report.Report, cfg config.CrawlConfig, runErr error) int {
+// 0 = pass, 1 = score gate failure or regression, 2 = systemic/CLI error.
+func exitCodeFor(rep report.Report, cfg config.CrawlConfig, runErr error, regressed bool) int {
 	if runErr != nil {
 		return 2
 	}
-	if rep.Score < cfg.FailBelow {
+	if regressed || rep.Score < cfg.FailBelow {
 		return 1
 	}
 	return 0
@@ -127,7 +153,6 @@ func runCrawl(ctx context.Context, cfg config.CrawlConfig) (report.Report, error
 	}), nil
 }
 
-
 func init() {
 	crawlCmd.Flags().StringVar(&crawlCfg.URL, "url", "", "target URL (required)")
 	crawlCmd.Flags().IntVar(&crawlCfg.MaxPages, "max-pages", 100, "max pages to crawl")
@@ -138,6 +163,9 @@ func init() {
 	crawlCmd.Flags().StringVar(&crawlCfg.Output, "output", "text", "text|json")
 	crawlCmd.Flags().IntVar(&crawlCfg.FailBelow, "fail-below", 0, "exit 1 if score below this")
 	crawlCmd.Flags().StringVar(&crawlCfg.Baseline, "baseline", "", "path to baseline JSON report")
+	crawlCmd.Flags().IntVar(&crawlCfg.MaxScoreDrop, "max-score-drop", 5, "tolerated score drop vs --baseline")
+	crawlCmd.Flags().StringSliceVar(&crawlCfg.StrictRules, "strict-rules", regression.DefaultStrictRules(),
+		`check IDs whose new failures fail the gate regardless of score ("" to disable)`)
 	crawlCmd.MarkFlagRequired("url")
 	rootCmd.AddCommand(crawlCmd)
 }

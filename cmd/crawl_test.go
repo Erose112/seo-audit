@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -73,6 +74,32 @@ func TestCrawlJSONOutput(t *testing.T) {
 	}
 	if _, ok := payload["site_issues"]; !ok {
 		t.Error("missing site_issues key")
+	}
+}
+
+func TestCrawlCorruptBaseline(t *testing.T) {
+	old := crawlCfg
+	t.Cleanup(func() { crawlCfg = old })
+
+	dir := t.TempDir()
+	baseline := dir + "/baseline.json"
+	if err := os.WriteFile(baseline, []byte("{not json"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	crawlCfg = config.CrawlConfig{
+		URL:      "https://example.com",
+		Output:   "json",
+		Baseline: baseline,
+	}
+
+	cmd := &cobra.Command{}
+	cmd.SetOut(&bytes.Buffer{})
+	cmd.SetErr(&bytes.Buffer{})
+
+	err := crawlCmd.RunE(cmd, nil)
+	if err == nil {
+		t.Fatal("expected error for corrupt baseline")
 	}
 }
 

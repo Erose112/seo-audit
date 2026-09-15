@@ -9,6 +9,13 @@ field names, types, and presence rules as an API contract.
 Implementation uses Go's `encoding/json/v2` with `json.Deterministic(true)` so
 map key order is stable across runs.
 
+## Baseline files
+
+`crawl --baseline <path>` reads and writes the same JSON document shape as
+`crawl --output json`. There is no separate baseline schema — a baseline file
+is a full report. See [regression-engine.md](regression-engine.md) for the
+comparison and gating policy.
+
 ## Changelog
 
 ### Version 1
@@ -164,7 +171,7 @@ semantics.
 - **Trailing newline:** `WriteJSON` appends a single `\n` after the JSON object.
 - **Timestamps:** RFC 3339 UTC (e.g. `"2026-03-13T12:00:00Z"`).
 - **Field matching on decode:** v2 matches JSON keys case-sensitively (stricter
-than v1). Baseline loading in Stage 10 should use `json.UnmarshalRead` from v2.
+than v1). Baseline loading uses `json.UnmarshalRead` from v2.
 
 
 
