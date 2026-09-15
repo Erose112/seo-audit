@@ -635,7 +635,8 @@ exit 0/1. It should not re-implement failure-rate math.
 | `FetchRobots(ctx, …)` | **Done** (Stage 6; fail-open, always non-nil policy) |
 | `CrawlError` ← `FetchErrorKind` (+ `ErrKindParseFailure`) | **Done** (Stage 6) |
 | `Crawl(ctx, …) (CrawlResult, error)` + root / Rule 3 | **Done** (Stage 6) |
-| `FailBelow` / `Baseline` on `CrawlConfig` | **Done** (Stage 9; `MaxScoreDrop` deferred to Stage 10) |
+| `FailBelow` / `Baseline` on `CrawlConfig` | **Done** (Stage 9) |
+| `MaxScoreDrop` / `StrictRules` on `CrawlConfig` | **Done** (Stage 10) |
 
 **Also supersedes** the Stage 6 “v1: log and skip, don’t retry” note below:
 retries follow architecture §5 (already implemented on the fetcher).
@@ -982,6 +983,8 @@ logic; `RunE` calls `os.Exit` only at the outer edge.
 
 ## Stage 10 — Regression Engine
 
+**Status: Done.**
+
 **Goal:** Compare current report against a baseline JSON file; detect score
 drops and check-level PASS→FAIL flips; distinguish new failures from
 pre-existing ones.
@@ -1007,7 +1010,8 @@ type RegressionResult struct {
 	Delta         int
 	NewFailures   []Failure // present now, PASS/absent in baseline
 	Resolved      []Failure // was failing in baseline, now passing
-	Regressed     bool      // Delta < -maxScoreDrop OR len(NewFailures) > 0
+	Escalated     []Escalation // failing before and after, but worse now
+	Regressed     bool      // ScoreDropExceeded OR len(StrictViolations) > 0
 }
 
 type Failure struct {
@@ -1039,12 +1043,21 @@ any database).
 
 **Testing:** table-driven cases: no baseline (first run, no regression
 possible), improved score, degraded score under threshold, degraded score
-over threshold, same score but a new check failure (should still flag),
+over threshold, strict vs advisory new failures (CANONICAL regresses;
+TITLE_LENGTH advisory), escalation (severity-only, deduction-only, de-
+escalation ignored), site-wide VIEWPORT escalation at score threshold,
 check that flips FAIL→PASS while another flips PASS→FAIL simultaneously.
 
 **Exit criteria:** `seo-audit compare --baseline old.json --current new.json`
 and the inline `crawl --baseline ...` path both produce correct
 `RegressionResult`s against hand-built fixture JSON files.
+
+**Landed notes:** Gating policy, escalation, and rationale documented in
+[regression-engine.md](regression-engine.md). `--strict-rules` defaults to
+template-level checks; author-level checks are advisory. Baseline corrupt/
+missing semantics, atomic save, stderr regression output on `crawl`, and
+`return err` for exit-2 paths in new code. See landed files under
+`internal/regression/` and wired `cmd/crawl.go` / `cmd/compare.go`.
 
 ---
 
@@ -1118,7 +1131,13 @@ code changing.
 scores, exit codes, full JSON schema (reference the Stage 8 golden file),
 CI job config, "how to add a new check" (walk through implementing
 `checks.Check` and adding it to `AllChecks()`), baseline/regression
-behavior.
+behavior (reference [regression-engine.md](regression-engine.md)).
+- Consolidate `severityRank` / `isFailedSeverity` / `worseSeverity` from
+`report` plus regression's helpers into `checks`.
+- Align the landed `crawl error:` path with `return err` (retires
+`exitCodeFor`'s `runErr` parameter).
+- Evaluate `--max-page-score-drop` to complement the dilutable site score
+gate.
 
 **Exit criteria:** documented, tuned, running nightly, and integrated into
 at least one real deploy pipeline without false-positive noise.
@@ -1161,12 +1180,12 @@ No LLM-suggestion layer is planned at all for this tool.
 | 7. Site-wide analysis | Done   | 6          | yes, via httptest fixture server           |
 | 8. Reporting          | Done   | 5, 7       | yes, golden-file test                      |
 | 9. Exit codes         | Done   | 8          | yes (`exitCodeFor` unit tests + manual)    |
-| 10. Regression        | TODO   | 8          | yes, fully unit-testable                   |
+| 10. Regression        | Done   | 8          | yes, fully unit-testable                   |
 | 11. CI integration    | TODO   | 9, 10      | integration only, needs runner-side prereq |
 | 12. Validation & docs | TODO   | 11         | manual                                     |
 | 13. v2 backlog        | —      | —          | n/a                                        |
 
 
 Stages 2–5 and 10 are the ones you can build and fully unit-test with zero
-network access. Stage 9 is complete (exit codes / `--fail-below` gate over the
-landed report); next is Stage 10 (regression engine + baseline I/O).
+network access. Stage 10 is complete (regression engine + baseline I/O); next
+is Stage 11 (CI runner integration).

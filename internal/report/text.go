@@ -85,7 +85,7 @@ func writeFailedChecks(w io.Writer, pages []PageReport) error {
 		if len(messages) == 0 {
 			continue
 		}
-		path := pagePath(page.URL)
+		path := PagePath(page.URL)
 		if _, err := fmt.Fprintf(w, "- %s\n", path); err != nil {
 			return err
 		}
@@ -112,14 +112,14 @@ func writeSiteIssues(w io.Writer, site checks.SiteResult) error {
 			return err
 		}
 		for _, u := range urls {
-			if _, err := fmt.Fprintf(w, "  %s\n", pagePath(u)); err != nil {
+			if _, err := fmt.Fprintf(w, "  %s\n", PagePath(u)); err != nil {
 				return err
 			}
 		}
 	}
 
 	for _, bl := range site.BrokenLinks {
-		line := fmt.Sprintf("- Broken link from %s to %s (%s)", pagePath(bl.SourceURL), pagePath(bl.TargetURL), bl.Kind)
+		line := fmt.Sprintf("- Broken link from %s to %s (%s)", PagePath(bl.SourceURL), PagePath(bl.TargetURL), bl.Kind)
 		if bl.StatusCode != 0 {
 			line += fmt.Sprintf(" %d", bl.StatusCode)
 		}
@@ -133,7 +133,8 @@ func writeSiteIssues(w io.Writer, site checks.SiteResult) error {
 	return nil
 }
 
-func pagePath(raw string) string {
+// PagePath renders a URL as a path for terminal output (/ when empty).
+func PagePath(raw string) string {
 	u, err := url.Parse(raw)
 	if err != nil {
 		return raw
