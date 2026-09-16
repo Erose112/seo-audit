@@ -6,13 +6,7 @@ A Go CLI that crawls a site, runs SEO and technical-quality checks, scores it
 - **Standalone:** human-readable terminal output for spot-checking a site.
 - **In CI**: JSON report on stdout plus stable exit codes, so a CI runner can use it as a quality gate and compare each run against a stored baseline.
 
-Everything the CI side depends on: exit codes, JSON schema, baseline semantics, is documented in `[docs/](docs)`.
-
-```
-Crawler → Parser → Checks → Scoring → Report → Regression
-```
-
-
+Everything the CI side depends on: exit codes, JSON schema, baseline semantics, is documented in [`docs/`](docs).
 
 ## Contents
 
@@ -102,9 +96,9 @@ seo-audit crawl --url https://example.com --output json \
 The first run seeds `latest.json`; every later run compares against it, writes
 the regression summary to **stderr**, then overwrites the baseline.
 
-
-
 ## Commands
+
+
 
 ### `crawl`
 
@@ -156,8 +150,6 @@ Flags: `--baseline` and `--current` (both required), plus `--fail-below`,
 Unlike `crawl`, the diff is written to stdout. Exits 1 on regression or a score
 below `--fail-below`.
 
-
-
 ## Checks
 
 Seven per-page checks, each implementing `checks.Check`, plus two site-wide
@@ -184,8 +176,6 @@ intentional decorative-image pattern, not a missing attribute.
 Thresholds are named constants in `internal/checks` because tuning them against
 real-world pages is a deliberate follow-up, not a config surface.
 
-
-
 ## Scoring
 
 A page starts at 100, subtracts every check's deduction, and clamps to 0–100. The site score is the floored average of page scores.
@@ -198,8 +188,6 @@ magnitude instead of a single flat penalty.
 Averaging dilutes: on a 100-page site, one page collapsing from 100 to 0 moves
 the site score by a single point. That is why structural regressions are
 enforced by strict rules rather than by the score gate alone.
-
-
 
 ## Exit codes
 
@@ -281,16 +269,12 @@ Baseline failures on pages that were not crawled this run are skipped rather
 than reported as fixed. Full policy in
 [docs/regression-engine.md](docs/regression-engine.md).
 
-
-
 ## JSON report
 
 `--output json` emits a single deterministic object with a trailing newline. Map keys are ordered, so two identical runs produce identical bytes. A baseline file is the same document shape; there is no separate baseline schema.
 
 Full field reference, enum values, and stability policy:
 [docs/report-schema.md](docs/report-schema.md).
-
-
 
 ## How the crawl works
 
@@ -299,8 +283,6 @@ Sequential breadth-first traversal from the root URL, bounded by `--max-pages`,
 
 Design notes, retry schedule, error classification, and URL-normalization edge
 cases: [docs/crawler-architecture.md](docs/crawler-architecture.md).
-
-
 
 ## Project layout
 
@@ -320,8 +302,6 @@ Data flows one direction. No later stage reaches back into an earlier one's
 internals, which is what keeps everything from the parser onward testable with
 no network access.
 
-
-
 ## Development
 
 ```bash
@@ -335,8 +315,6 @@ make help               # all targets
 CI runs vet, build, and both test suites on every push and pull request to
 `main`.
 
-
-
 ## Scope
 
 **In v1:** the nine checks above, sequential crawling with robots.txt and rate
@@ -348,8 +326,6 @@ page auditing, sitemap intelligence, redirect-chain tracking, orphan-page
 analysis, duplicate meta-description detection, a score-history dashboard, and
 concurrent scraping. Baseline storage stays a plain JSON file — no database or
 caching.
-
-
 
 ## Documentation
 
