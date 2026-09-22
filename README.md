@@ -6,7 +6,7 @@ A Go CLI that crawls a site, runs SEO and technical-quality checks, scores it
 - **Standalone:** human-readable terminal output for spot-checking a site.
 - **In CI**: JSON report on stdout plus stable exit codes, so a CI runner can use it as a quality gate and compare each run against a stored baseline.
 
-Everything the CI side depends on: exit codes, JSON schema, baseline semantics, is documented in [`docs/`](docs).
+Everything the CI side depends on: exit codes, JSON schema, baseline semantics, is documented in `[docs/](docs)`.
 
 ## Contents
 
@@ -106,19 +106,19 @@ Crawls a site, runs all checks, scores it, and optionally gates on score and
 regression.
 
 
-| Flag               | Default                         | Description                                                                                                           |
-| ------------------ | ------------------------------- | --------------------------------------------------------------------------------------------------------------------- |
-| `--url`            | *(required)*                    | Root URL to crawl.                                                                                                    |
-| `--output`         | `text`                          | `text` for humans, `json` for CI. JSON goes to stdout with nothing else mixed in.                                     |
-| `--max-pages`      | `100`                           | Crawl budget.                                                                                                         |
-| `--max-depth`      | `5`                             | Link-depth limit from the root.                                                                                       |
-| `--delay`          | `200ms`                         | Delay between requests (politeness).                                                                                  |
-| `--max-duration`   | `5m`                            | Wall-clock ceiling for the whole crawl.                                                                               |
-| `--max-body-size`  | `2097152`                       | Response bytes read per page (2 MiB).                                                                                 |
-| `--fail-below`     | `0`                             | Exit 1 when the site score is below this. **The default disables the score gate** (`score < 0` is never true).        |
-| `--baseline`       | *(none)*                        | Path to a baseline JSON report. Enables regression comparison and baseline write-back. **Omitting it disables both.** |
-| `--max-score-drop` | `5`                             | Tolerated score drop vs the baseline. A drop of exactly this much passes.                                             |
-| `--strict-rules`   | see [below](#regression-gating) | Check IDs whose *new* failures fail the gate regardless of score. Pass `""` to disable.                               |
+| Flag               | Default                         | Description                                                                                                                                                                    |
+| ------------------ | ------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `--url`            | *(required)*                    | Root URL to crawl.                                                                                                                                                             |
+| `--output`         | `text`                          | `text` for humans, `json` for CI. JSON goes to stdout with nothing else mixed in.                                                                                              |
+| `--max-pages`      | `100`                           | Crawl budget.                                                                                                                                                                  |
+| `--max-depth`      | `5`                             | Link-depth limit from the root.                                                                                                                                                |
+| `--delay`          | `200ms`                         | Delay between requests (politeness).                                                                                                                                           |
+| `--max-duration`   | `5m`                            | Overall crawl timeout.                                                                                                                                                         |
+| `--max-body-size`  | `2097152`                       | Response bytes read per page (2 MiB).                                                                                                                                          |
+| `--fail-below`     | `0`                             | Exit 1 when the site score is below this. **The default disables the score gate** (`score < 0` is never true).                                                                 |
+| `--baseline`       | *(none)*                        | Path to a baseline JSON report. Enables regression comparison and baseline write-back. **Omitting it disables both.**                                                          |
+| `--max-score-drop` | `5`                             | Tolerated score drop vs the baseline. A drop of exactly this much passes.                                                                                                      |
+| `--strict-rules`   | see [below](#regression-gating) | SEO checks (e.g. `SINGLE_H1`) that fail the build on new or worse failures even when the score drop is within `--max-score-drop`. Pass `""` to disable (score-drop gate only). |
 
 
 
@@ -152,8 +152,7 @@ below `--fail-below`.
 
 ## Checks
 
-Seven per-page checks, each implementing `checks.Check`, plus two site-wide
-findings that need the whole crawl.
+Seven per-page checks, plus two site-wide findings that need the whole crawl.
 
 
 | Check ID           | What it requires                                         | Failure severity and deduction                                                                             |
@@ -191,7 +190,7 @@ enforced by strict rules rather than by the score gate alone.
 
 ## Exit codes
 
-A frozen contract with the CI runner see [docs/ci-integration.md](docs/ci-integration.md).
+A contract with the CI runner see [docs/ci-integration.md](docs/ci-integration.md).
 
 
 | Code | Meaning                                                                                                                                   | What to do                                                                                  |
@@ -321,11 +320,7 @@ CI runs vet, build, and both test suites on every push and pull request to
 limiting, 0–100 scoring, text and JSON reports, file-based baseline regression,
 and the CI exit-code contract.
 
-**Deliberately out of v1:** full schema.org validation, JavaScript-rendered
-page auditing, sitemap intelligence, redirect-chain tracking, orphan-page
-analysis, duplicate meta-description detection, a score-history dashboard, and
-concurrent scraping. Baseline storage stays a plain JSON file — no database or
-caching.
+**Deliberately out of v1:** full schema.org validation, JavaScript-rendered page auditing, sitemap intelligence, redirect-chain tracking, orphan-page analysis, duplicate meta-description detection, a score-history dashboard, and concurrent scraping. Baseline storage stays a plain JSON file; no database or caching.
 
 ## Documentation
 

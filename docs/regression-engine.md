@@ -29,6 +29,8 @@ flowchart LR
   Delta["Score delta"] --> Gate
 ```
 
+
+
 **Decision:** regression operates on serialized `Report` values, not live crawl
 state.
 
@@ -38,16 +40,20 @@ network access and decouples it from the crawler.
 
 ---
 
+
+
 ## 2. The diff model
 
 Each report is reduced to a set of **failing findings** keyed by
 `(URL, CheckID, Detail)`:
 
-| Source | CheckID | Detail |
-| --- | --- | --- |
-| Page check with Warning/Error severity | check's ID | empty |
-| Duplicate title on a URL | `DUPLICATE_TITLE` | empty |
-| Broken link from a page | `BROKEN_LINK` | target URL |
+
+| Source                                 | CheckID           | Detail     |
+| -------------------------------------- | ----------------- | ---------- |
+| Page check with Warning/Error severity | check's ID        | empty      |
+| Duplicate title on a URL               | `DUPLICATE_TITLE` | empty      |
+| Broken link from a page                | `BROKEN_LINK`     | target URL |
+
 
 **Decision:** use set difference over failing entries, not a per-check severity
 walk.
@@ -66,14 +72,18 @@ them.
 
 ---
 
+
+
 ## 3. The four outputs
 
-| Output | Meaning |
-| --- | --- |
-| `NewFailures` | In current, absent from baseline (PASS→FAIL or first-seen) |
-| `Resolved` | In baseline, absent from current, URL still crawled this run |
-| `Escalated` | In both, but severity rank or deduction increased |
+
+| Output             | Meaning                                                                   |
+| ------------------ | ------------------------------------------------------------------------- |
+| `NewFailures`      | In current, absent from baseline (PASS→FAIL or first-seen)                |
+| `Resolved`         | In baseline, absent from current, URL still crawled this run              |
+| `Escalated`        | In both, but severity rank or deduction increased                         |
 | `StrictViolations` | Subset of new failures + escalations whose CheckID is in `--strict-rules` |
+
 
 **Resolved messages come from the baseline side.** A currently-passing check
 returns an empty message, so pulling from current would print blank entries.
@@ -84,6 +94,8 @@ run is not counted as resolved — it may be unreachable, not fixed.
 All four slices are sorted by URL, then CheckID, then Detail, before return.
 
 ---
+
+
 
 ## 4. The gating policy
 
@@ -102,9 +114,11 @@ deploys on every new title-length warning causes teams to disable the gate.
 
 **Decision:** default `--strict-rules` to template-level checks only.
 
-| Default strict (gate on new failure or escalation) | Advisory (score only) |
-| --- | --- |
+
+| Default strict (gate on new failure or escalation)                                     | Advisory (score only)                           |
+| -------------------------------------------------------------------------------------- | ----------------------------------------------- |
 | `TITLE_EXISTS`, `SINGLE_H1`, `VIEWPORT`, `CANONICAL`, `BROKEN_LINK`, `DUPLICATE_TITLE` | `TITLE_LENGTH`, `META_DESCRIPTION`, `IMAGE_ALT` |
+
 
 Template-level checks are rendered by code and essentially never fail on
 purpose. Author-level checks are left to the score gate.
@@ -119,11 +133,11 @@ scoring 100 throughout, one page collapsing to 0 moves the site score to 99 — 
 1-point drop. Five pages could break completely and land exactly at -5, which
 the strict `<` comparison tolerates. Site issues carry no score weight at all.
 
-This is why `--strict-rules` carries the gate's real enforcement for structural
-regressions, and why escalation detection matters for checks that were already
-failing.
+This is why `--strict-rules` carries the gate's real enforcement for structural regressions, and why escalation detection matters for checks that were already failing.
 
 ---
+
+
 
 ## 5. Escalation
 
@@ -152,16 +166,18 @@ moment the page got worse.
 
 ---
 
+
+
 ## 6. Baseline lifecycle
 
 1. **Load before crawl** — corrupt or schema-mismatched baselines fail fast
-   (exit 2) before `--max-duration` is spent.
+  (exit 2) before `--max-duration` is spent.
 2. **Missing file = first run** — `LoadBaseline` returns a zero-value report;
-   `Compare` short-circuits when `baseline.SchemaVersion == 0`.
+  `Compare` short-circuits when `baseline.SchemaVersion == 0`.
 3. **Compare after report write** — regression output goes to stderr for
-   `crawl` (stdout must stay pure JSON when `--output json`).
+  `crawl` (stdout must stay pure JSON when `--output json`).
 4. **Save after compare** — today's report becomes tomorrow's baseline
-   regardless of pass/fail.
+  regardless of pass/fail.
 5. **Atomic write** — `SaveBaseline` writes to `path.tmp` then renames.
 
 The baseline file is a standard `crawl --output json` report — no separate
@@ -169,13 +185,17 @@ schema. See [report-schema.md](report-schema.md).
 
 ---
 
+
+
 ## 7. Exit codes and error style
 
-| Code | Meaning |
-| --- | --- |
-| 0 | Pass — score gate and regression gate both satisfied |
-| 1 | Gate failure — score below `--fail-below` or regression detected |
-| 2 | System/CLI error — crawl failure, corrupt baseline, unknown strict rule |
+
+| Code | Meaning                                                                 |
+| ---- | ----------------------------------------------------------------------- |
+| 0    | Pass — score gate and regression gate both satisfied                    |
+| 1    | Gate failure — score below `--fail-below` or regression detected        |
+| 2    | System/CLI error — crawl failure, corrupt baseline, unknown strict rule |
+
 
 **Decision:** `return err` for exit-2 paths inside `RunE`; `os.Exit(1)` only
 for gate failure.
@@ -186,6 +206,8 @@ baseline paths unit-testable without a subprocess harness.
 
 ---
 
+
+
 ## 8. Determinism
 
 Map iteration order is nondeterministic in Go. All diff output slices are sorted
@@ -195,6 +217,8 @@ output. This matches the crawler's determinism goal in
 
 ---
 
+
+
 ## 9. Known limitations
 
 Deliberate non-goals for v1:
@@ -202,10 +226,10 @@ Deliberate non-goals for v1:
 - Pages present only in the baseline are skipped, not reported as "vanished."
 - Same-tier, same-deduction message changes are invisible.
 - A broken link's HTTP status changing (500→404) keys identically and is not a
-  degradation.
+degradation.
 - Site findings carry no score weight; only strict rules catch them.
 - Per-page score dilution remains; a future `--max-page-score-drop` flag is
-  recorded as a Stage 12 follow-up.
+recorded as a Stage 12 follow-up.
 
 Stage 12 follow-ups also include consolidating `severityRank` helpers scattered
 across `report` and `regression` into `checks`, and aligning the landed

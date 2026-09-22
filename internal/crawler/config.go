@@ -5,9 +5,7 @@ import (
 	"time"
 )
 
-// Config holds the crawl-wide settings the fetch layer needs. Stage 6 maps
-// the CLI's config.CrawlConfig onto this; keeping it separate stops the
-// internal packages from depending on Cobra flag wiring.
+// Config holds the crawl-wide settings the fetch layer needs.
 type Config struct {
 	// MaxBodySize caps how many bytes of a response body are read.
 	MaxBodySize int64
