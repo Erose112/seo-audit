@@ -34,9 +34,9 @@ an explicit `--baseline` path pointing into its persistent directory.
 | `--fail-below` | yes (CI) | `80` | Exit 1 when site score is below this threshold. **Default `0` disables the score gate entirely** (`score < 0` is never true). |
 | `--baseline` | yes (CI) | `<job-dir>/latest.json` | Enables regression comparison and baseline write-back. **Omitting this disables regression gating and prevents the baseline from ever being written.** |
 | `--max-score-drop` | no | `5` | Tolerated score drop vs baseline before regression exit 1. |
-| `--strict-rules` | no | (default list) | Check IDs whose *new* failures fail the gate regardless of score. Pass `""` to disable. |
+| `--strict-rules` | no | (default list) | SEO checks (e.g. `SINGLE_H1`) that fail the build on new or worse failures even when the score drop is within `--max-score-drop`. Pass `""` to disable (score-drop gate only). |
 | `--max-pages` | no | `100` | Crawl budget. Lower for faster CI on large sites. |
-| `--max-duration` | no | `5m` | Wall-clock crawl ceiling. Runner job timeout must exceed this. |
+| `--max-duration` | no | `5m` | Overall crawl timeout. Runner job timeout must exceed this. |
 | `--max-depth` | no | `5` | Link depth limit. |
 | `--delay` | no | `200ms` | Inter-request delay (politeness). |
 

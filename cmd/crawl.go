@@ -158,14 +158,14 @@ func init() {
 	crawlCmd.Flags().IntVar(&crawlCfg.MaxPages, "max-pages", 100, "max pages to crawl")
 	crawlCmd.Flags().IntVar(&crawlCfg.MaxDepth, "max-depth", 5, "max crawl depth")
 	crawlCmd.Flags().DurationVar(&crawlCfg.Delay, "delay", 200*time.Millisecond, "delay between requests")
-	crawlCmd.Flags().DurationVar(&crawlCfg.MaxDuration, "max-duration", 5*time.Minute, "max wall-clock time for the crawl")
+	crawlCmd.Flags().DurationVar(&crawlCfg.MaxDuration, "max-duration", 5*time.Minute, "overall crawl timeout")
 	crawlCmd.Flags().Int64Var(&crawlCfg.MaxBodySize, "max-body-size", crawler.DefaultMaxBodySize, "max response body bytes to read per page")
 	crawlCmd.Flags().StringVar(&crawlCfg.Output, "output", "text", "text|json")
 	crawlCmd.Flags().IntVar(&crawlCfg.FailBelow, "fail-below", 0, "exit 1 if score below this")
 	crawlCmd.Flags().StringVar(&crawlCfg.Baseline, "baseline", "", "path to baseline JSON report")
 	crawlCmd.Flags().IntVar(&crawlCfg.MaxScoreDrop, "max-score-drop", 5, "tolerated score drop vs --baseline")
 	crawlCmd.Flags().StringSliceVar(&crawlCfg.StrictRules, "strict-rules", regression.DefaultStrictRules(),
-		`check IDs whose new failures fail the gate regardless of score ("" to disable)`)
+		`SEO checks (e.g. SINGLE_H1) that fail the build on new or worse failures even when score drop is within --max-score-drop ("" disables)`)
 	crawlCmd.MarkFlagRequired("url")
 	rootCmd.AddCommand(crawlCmd)
 }

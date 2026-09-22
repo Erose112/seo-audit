@@ -54,7 +54,7 @@ func init() {
 	compareCmd.Flags().IntVar(&compareCfg.FailBelow, "fail-below", 0, "exit 1 if current score below this")
 	compareCmd.Flags().IntVar(&compareCfg.MaxScoreDrop, "max-score-drop", 5, "regression threshold")
 	compareCmd.Flags().StringSliceVar(&compareCfg.StrictRules, "strict-rules", regression.DefaultStrictRules(),
-		`check IDs whose new failures fail the gate regardless of score ("" to disable)`)
+		`SEO checks (e.g. SINGLE_H1) that fail the build on new or worse failures even when score drop is within --max-score-drop ("" disables)`)
 	compareCmd.Flags().IntVar(&compareCfg.TextMatchPct, "text-match-pct", 0, "minimum text-match percentage")
 	compareCmd.MarkFlagRequired("baseline")
 	compareCmd.MarkFlagRequired("current")
