@@ -6,7 +6,7 @@ A Go CLI that crawls a site, runs SEO and technical-quality checks, scores it
 - **Standalone:** human-readable terminal output for spot-checking a site.
 - **In CI**: JSON report on stdout plus stable exit codes, so a CI runner can use it as a quality gate and compare each run against a stored baseline.
 
-Everything the CI side depends on: exit codes, JSON schema, baseline semantics, is documented in `[docs/](docs)`.
+Everything the CI side depends on: exit codes, JSON schema, baseline semantics, is documented in [`docs/`](docs).
 
 ## Contents
 
